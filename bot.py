@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import logging
 import random
+import re
 import itertools
 from datetime import datetime
 from io import BytesIO
@@ -18,18 +19,52 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8663562942:AAGLFTtUT2V-uH0t3eWHwwcVfxVBEXuqZJg")
+IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 
-# Free Rotating Proxies (Add Webshare or HTTP proxies here or via PROXIES env var)
-# Format: "http://username:password@ip:port" or "http://ip:port"
-DEFAULT_PROXIES = [
-    p.strip() for p in os.getenv("PROXIES", "").split(",") if p.strip()
+# User Webshare proxies default list
+BUILTIN_PROXIES = [
+    "http://huezajaf:0lsun8mr921c@31.59.20.176:6754",
+    "http://huezajaf:0lsun8mr921c@45.38.107.97:6014",
+    "http://huezajaf:0lsun8mr921c@198.105.121.200:6462",
+    "http://huezajaf:0lsun8mr921c@64.137.96.74:6641",
+    "http://huezajaf:0lsun8mr921c@198.23.243.226:6361",
+    "http://huezajaf:0lsun8mr921c@38.154.185.97:6370",
+    "http://huezajaf:0lsun8mr921c@84.247.60.125:6095",
+    "http://huezajaf:0lsun8mr921c@142.111.67.146:5611",
+    "http://huezajaf:0lsun8mr921c@191.96.254.138:6185",
+    "http://huezajaf:0lsun8mr921c@31.58.9.4:6077",
+    "http://huezajaf-rotate:0lsun8mr921c@p.webshare.io:80/",
 ]
-# Fallback free proxies if none specified in .env
-if not DEFAULT_PROXIES:
-    DEFAULT_PROXIES = [
-        None  # Direct connection fallback
-    ]
 
+def parse_proxy_entry(entry: str) -> str:
+    entry = entry.strip()
+    if not entry:
+        return ""
+    if entry.startswith("http://") or entry.startswith("https://") or entry.startswith("socks5://"):
+        return entry
+    parts = entry.split(":")
+    if len(parts) == 4:
+        # Format: ip:port:user:pass
+        ip, port, user, pwd = parts
+        return f"http://{user}:{pwd}@{ip}:{port}"
+    elif len(parts) == 2:
+        # Format: ip:port
+        return f"http://{parts[0]}:{parts[1]}"
+    return entry
+
+def get_configured_proxies():
+    env_str = os.getenv("PROXIES", "").strip()
+    proxies = []
+    if env_str:
+        for chunk in re.split(r'[,;\n\r]+', env_str):
+            parsed = parse_proxy_entry(chunk)
+            if parsed:
+                proxies.append(parsed)
+    if not proxies:
+        proxies = BUILTIN_PROXIES.copy()
+    return proxies
+
+DEFAULT_PROXIES = get_configured_proxies()
 proxy_pool = itertools.cycle(DEFAULT_PROXIES)
 
 USER_AGENTS = [
@@ -198,52 +233,86 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
 
 async def check_single_account(session: aiohttp.ClientSession, username: str) -> dict:
     """
-    Direct asynchronous HTTP GET to Instagram's public API endpoint with rotating proxies and browser headers.
+    Direct asynchronous check using rotating proxies:
+    Layer 1: If IG_SESSIONID is set, tries Instagram's web_profile_info endpoint.
+    Layer 2: Social crawler OpenGraph extraction (no login needed, zero cost).
     """
-    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     proxy = get_next_proxy()
     
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "X-IG-App-ID": "936619743392459",
-        "Accept": "*/*",
+    # --- Layer 1: web_profile_info (if session cookie available) ---
+    if IG_SESSIONID:
+        api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+        api_headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "X-IG-App-ID": "936619743392459",
+            "Cookie": f"sessionid={IG_SESSIONID};",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"https://www.instagram.com/{username}/",
+        }
+        try:
+            async with session.get(api_url, headers=api_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    user = data.get("data", {}).get("user")
+                    if user:
+                        followers = user.get("edge_followed_by", {}).get("count", 0)
+                        if followers is not None and followers > 0:
+                            return {
+                                "status": "active",
+                                "username": user.get("username", username),
+                                "followers": format_num(followers),
+                                "posts": format_num(user.get("edge_owner_to_timeline_media", {}).get("count", 0)),
+                                "following": format_num(user.get("edge_follow", {}).get("count", 0)),
+                                "pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
+                            }
+                    return {"status": "banned"}
+                elif resp.status in [404, 400]:
+                    return {"status": "banned"}
+        except Exception as e:
+            logging.debug(f"API check error for @{username}: {e}")
+
+    # --- Layer 2: Social Crawler OpenGraph Extraction (Zero login requirement) ---
+    crawler_url = f"https://www.instagram.com/{username}/"
+    crawler_headers = {
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"https://www.instagram.com/{username}/",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
     }
 
     try:
-        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                user = data.get("data", {}).get("user")
-                if user:
-                    followers = user.get("edge_followed_by", {}).get("count", 0)
-                    if followers is not None and followers > 0:
-                        return {
-                            "status": "active",
-                            "username": user.get("username", username),
-                            "followers": format_num(followers),
-                            "posts": format_num(user.get("edge_owner_to_timeline_media", {}).get("count", 0)),
-                            "following": format_num(user.get("edge_follow", {}).get("count", 0)),
-                            "pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                        }
+        async with session.get(crawler_url, headers=crawler_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 404:
                 return {"status": "banned"}
-
-            elif resp.status in [404, 400]:
-                # Account is banned/deactivated or not found
-                return {"status": "banned"}
-
-            elif resp.status in [429, 403]:
-                # Rate-limited or blocked, retry next round with another proxy
-                logging.warning(f"Rate limited ({resp.status}) for @{username} on proxy {proxy}")
+            
+            text = await resp.text()
+            if "Login • Instagram" in text or resp.status in (429, 403):
+                logging.warning(f"Rate limited or login challenge for @{username} on proxy {proxy}")
                 return {"status": "rate_limited"}
+
+            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', text)
+            if desc_match:
+                desc = desc_match.group(1)
+                m = re.search(r'([\d\.,kKmMbB]+)\s+Followers,\s*([\d\.,kKmMbB]+)\s+Following,\s*([\d\.,kKmMbB]+)\s+Posts', desc, re.IGNORECASE)
+                img_match = re.search(r'<meta property="og:image" content="([^"]+)"', text)
+                pic_url = img_match.group(1).replace('&amp;', '&') if img_match else None
+                if m:
+                    return {
+                        "status": "active",
+                        "username": username,
+                        "followers": m.group(1),
+                        "following": m.group(2),
+                        "posts": m.group(3),
+                        "pic_url": pic_url,
+                    }
+
+            if "Page Not Found" in text or 'content="Page Not Found"' in text or "<title>Instagram</title>" in text:
+                return {"status": "banned"}
 
             return {"status": "unknown"}
 
     except Exception as e:
-        logging.debug(f"Request error for @{username}: {e}")
+        logging.debug(f"Crawler request error for @{username} on {proxy}: {e}")
         return {"status": "error"}
 
 
