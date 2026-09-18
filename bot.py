@@ -30,6 +30,7 @@ dp = Dispatcher()
 monitored_accounts = {}
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
+FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
 
 
 def format_num(count):
@@ -46,20 +47,36 @@ def format_num(count):
         return str(count)
 
 
+def get_card_fonts():
+    """Load bundled TrueType font for cross-platform Linux/Mac rendering"""
+    if os.path.exists(FONT_PATH):
+        try:
+            return {
+                "username": ImageFont.truetype(FONT_PATH, 48),
+                "btn": ImageFont.truetype(FONT_PATH, 26),
+                "stats_num": ImageFont.truetype(FONT_PATH, 34),
+                "stats_lbl": ImageFont.truetype(FONT_PATH, 30),
+                "name": ImageFont.truetype(FONT_PATH, 32),
+            }
+        except Exception as e:
+            logging.error(f"Error loading bundled font.ttf: {e}")
+
+    d = ImageFont.load_default()
+    return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
+
+
 async def create_profile_card(username, followers, posts, following, pic_url=None, is_banned=False):
     """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
     width, height = 1000, 550
     img = Image.new('RGB', (width, height), color='#000000')
     draw = ImageDraw.Draw(img)
 
-    try:
-        font_username = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 48)
-        font_btn = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 26)
-        font_stats_num = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 34)
-        font_stats_lbl = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 30)
-        font_name = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 32)
-    except Exception:
-        font_username = font_btn = font_stats_num = font_stats_lbl = font_name = ImageFont.load_default()
+    fonts = get_card_fonts()
+    font_username = fonts["username"]
+    font_btn = fonts["btn"]
+    font_stats_num = fonts["stats_num"]
+    font_stats_lbl = fonts["stats_lbl"]
+    font_name = fonts["name"]
 
     av_center = (180, 275)
     av_r = 100
@@ -67,7 +84,7 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
 
     avatar_drawn = False
 
-    # For BANNED account, always use default_banned_dp.jpg!
+    # For BANNED account, use default_banned_dp.jpg
     if is_banned and os.path.exists(DEFAULT_BANNED_DP_PATH):
         try:
             dp_img = Image.open(DEFAULT_BANNED_DP_PATH).convert("RGB").resize(av_size)
@@ -358,13 +375,13 @@ async def show_active(message: types.Message):
         elapsed = datetime.now() - t["start_time"]
         h, r = divmod(int(elapsed.total_seconds()), 3600)
         m, s = divmod(r, 60)
-        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {h}h {m}m {s}s")
+        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {h}h {m}s")
 
     await message.answer("\n".join(lines))
 
 
 async def main():
-    print("⚡ Truzd Monitor Bot is Live with Official Default Banned DP & Dynamic Layout!")
+    print("⚡ Truzd Monitor Bot is Live with Bundled TTF Font & Dynamic Cards!")
     asyncio.create_task(monitor_loop())
     await dp.start_polling(bot)
 
