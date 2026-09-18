@@ -19,7 +19,7 @@ logging.basicConfig(
 )
 
 # Storage for active monitoring tasks
-# Key: f"{chat_id}_{username}", Value: {'task': asyncio.Task, 'mode': 'unban'|'ban', 'start_time': float}
+# Key: f"{chat_id}_{username}", Value: {'task': asyncio.Task, 'mode': 'unban'|'ban', 'start_time': float, 'username': str}
 active_monitors = {}
 
 
@@ -73,8 +73,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 **Truzd Instagram Monitor Bot**\n\n"
         "Commands:\n"
-        "• `/monitor <username>` — Monitor disabled account until UNBANNED.\n"
-        "• `/banmonitor <username>` — Monitor active account until BANNED.\n"
+        "• `/monitor <username>` — Track a single IG account for UNBAN.\n"
+        "• `/banmonitor <username>` — Track an active IG account for BAN.\n"
+        "• `/bulk <user1> <user2> ...` — Add multiple IG accounts at once.\n"
         "• `/stop <username>` — Stop monitoring a username.\n"
         "• `/active` — View all active monitoring tasks."
     )
@@ -101,7 +102,7 @@ async def monitor_unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"ℹ️ @{username} is already active! Use `/banmonitor` if you want to track bans.")
         return
 
-    await update.message.reply_text(f"🔍 **Monitoring @{username} started!** (Waiting for Unban)", parse_mode="Markdown")
+    await update.message.reply_text(f"🔍 **Monitoring @{username} started!**", parse_mode="Markdown")
 
     start_time = time.time()
 
@@ -169,6 +170,63 @@ async def monitor_ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_monitors[task_key] = {"task": task, "mode": "ban", "start_time": start_time, "username": username}
 
 
+async def bulk_monitor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command: /bulk <user1> <user2> ... (Add multiple IG accounts at once)"""
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/bulk user1 user2 user3`", parse_mode="Markdown")
+        return
+
+    raw_input = " ".join(context.args)
+    # Support comma, space, or newline separated usernames
+    raw_list = raw_input.replace(",", " ").split()
+    usernames = list(dict.fromkeys([u.replace("@", "").strip().lower() for u in raw_list if u.strip()]))
+
+    chat_id = update.effective_chat.id
+    started = []
+    skipped = []
+
+    for username in usernames:
+        task_key = f"{chat_id}_{username}"
+        if task_key in active_monitors:
+            skipped.append(f"@{username} (Already monitoring)")
+            continue
+
+        status = check_instagram_status(username)
+        if status["is_active"]:
+            skipped.append(f"@{username} (Already active)")
+            continue
+
+        start_time = time.time()
+
+        async def make_loop(u=username, st_time=start_time, key=task_key):
+            while True:
+                await asyncio.sleep(5)
+                st = check_instagram_status(u)
+                if st["is_active"]:
+                    elapsed = format_duration(time.time() - st_time)
+                    alert_msg = (
+                        f"✅ **Username unbanned!**\n\n"
+                        f"@{u} is active again — [View Profile](https://instagram.com/{u})\n"
+                        f"Followers: {st['followers']}\n"
+                        f"Time elapsed: {elapsed}"
+                    )
+                    await context.bot.send_message(chat_id=chat_id, text=alert_msg, parse_mode="Markdown", disable_web_page_preview=False)
+                    active_monitors.pop(key, None)
+                    break
+
+        task = asyncio.create_task(make_loop())
+        active_monitors[task_key] = {"task": task, "mode": "unban", "start_time": start_time, "username": username}
+        started.append(f"@{username}")
+
+    msg_parts = []
+    if started:
+        msg_parts.append(f"🔍 **Bulk Monitoring Started ({len(started)} accounts):**\n" + ", ".join(started))
+    if skipped:
+        msg_parts.append(f"⚠️ **Skipped ({len(skipped)} accounts):**\n" + "\n".join(skipped))
+
+    await update.message.reply_text("\n\n".join(msg_parts), parse_mode="Markdown")
+
+
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Usage: `/stop <username>`", parse_mode="Markdown")
@@ -213,6 +271,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("monitor", monitor_unban_cmd))
     app.add_handler(CommandHandler("banmonitor", monitor_ban_cmd))
+    app.add_handler(CommandHandler("bulk", bulk_monitor_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("active", active_cmd))
 
