@@ -2,13 +2,11 @@ import os
 import asyncio
 import aiohttp
 import logging
-import sys
-import json
-import re
-import html
+import random
+import itertools
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types
@@ -16,21 +14,50 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-# Load environment variables
 load_dotenv()
 
+# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8663562942:AAGLFTtUT2V-uH0t3eWHwwcVfxVBEXuqZJg")
-APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_Quo24KgwXfYdIQUBBoDMxtzzUUzqk20IcBPG")
 
-logging.basicConfig(level=logging.INFO)
+# Free Rotating Proxies (Add Webshare or HTTP proxies here or via PROXIES env var)
+# Format: "http://username:password@ip:port" or "http://ip:port"
+DEFAULT_PROXIES = [
+    p.strip() for p in os.getenv("PROXIES", "").split(",") if p.strip()
+]
+# Fallback free proxies if none specified in .env
+if not DEFAULT_PROXIES:
+    DEFAULT_PROXIES = [
+        None  # Direct connection fallback
+    ]
+
+proxy_pool = itertools.cycle(DEFAULT_PROXIES)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 312.1.0.34.111",
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36 Instagram 313.0.0.35.111",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+]
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
+FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+# Monitored accounts dictionary
+# Key: username.lower(), Value: dict(username=raw, chat_id=id, start_time=datetime, mode='unban'|'ban')
 monitored_accounts = {}
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
-FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
+
+
+def get_next_proxy():
+    return next(proxy_pool)
 
 
 def format_num(count):
@@ -59,7 +86,7 @@ def get_card_fonts():
                 "name": ImageFont.truetype(FONT_PATH, 32),
             }
         except Exception as e:
-            logging.error(f"Error loading bundled font.ttf: {e}")
+            logging.error(f"Error loading font.ttf: {e}")
 
     d = ImageFont.load_default()
     return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
@@ -98,8 +125,9 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     # If unbanned & has pic_url, download avatar
     if not avatar_drawn and pic_url:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(pic_url, timeout=5) as resp:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(pic_url) as resp:
                     if resp.status == 200:
                         avatar_bytes = await resp.read()
                         av_img = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize(av_size)
@@ -115,13 +143,11 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
         first_char = username[0].upper() if username else 'U'
         draw.text((av_center[0]-15, av_center[1]-25), first_char, font=font_username, fill='#ffffff')
 
-    # Username Title
     display_username = username if not is_banned else "UserNotFound"
     uname_x = 320
     uname_y = 200
     draw.text((uname_x, uname_y), display_username, font=font_username, fill='#ffffff')
 
-    # DYNAMIC LAYOUT MATH FOR BUTTON & DOTS (ZERO OVERLAP!)
     try:
         uname_w = draw.textlength(display_username, font=font_username)
     except Exception:
@@ -139,7 +165,6 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     for offset in [0, 14, 28]:
         draw.ellipse([dot_x+offset, dot_y, dot_x+offset+7, dot_y+7], fill='#ffffff')
 
-    # Stats Line
     posts_str = str(posts)
     folls_str = str(followers)
     follg_str = str(following)
@@ -162,7 +187,6 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     fgw = draw.textlength(follg_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(follg_str)*20
     draw.text((follg_x + fgw + 10, st_lbl_y), 'following', font=font_stats_lbl, fill='#a8a8a8')
 
-    # Subtitle Name
     sub_title = username if not is_banned else "UserNotFound"
     draw.text((320, 330), sub_title, font=font_name, fill='#ffffff')
 
@@ -172,105 +196,158 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     return bio
 
 
-async def check_batch_accounts(usernames_list):
-    """Batch fetch profile status using Apify Instagram Profile Scraper"""
-    API_URL = f"https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token={APIFY_TOKEN}"
-    found_accounts = {}
+async def check_single_account(session: aiohttp.ClientSession, username: str) -> dict:
+    """
+    Direct asynchronous HTTP GET to Instagram's public API endpoint with rotating proxies and browser headers.
+    """
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    proxy = get_next_proxy()
+    
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "X-IG-App-ID": "936619743392459",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://www.instagram.com/{username}/",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, json={"usernames": usernames_list}, timeout=35) as response:
-                if response.status in [200, 201]:
-                    data = await response.json()
-                    for item in data:
-                        uname = item.get("username") or item.get("ownerUsername")
-                        if uname:
-                            url_val = str(item.get("url", ""))
-                            followers = item.get("followersCount", 0)
-                            
-                            if "error" not in url_val and followers is not None and followers > 0:
-                                found_accounts[uname.lower()] = {
-                                    "username": uname,
-                                    "followers": format_num(followers),
-                                    "posts": format_num(item.get("postsCount", 0)),
-                                    "following": format_num(item.get("followsCount") or item.get("followingCount", 0)),
-                                    "pic_url": item.get("profilePicUrl", "")
-                                }
+        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                user = data.get("data", {}).get("user")
+                if user:
+                    followers = user.get("edge_followed_by", {}).get("count", 0)
+                    if followers is not None and followers > 0:
+                        return {
+                            "status": "active",
+                            "username": user.get("username", username),
+                            "followers": format_num(followers),
+                            "posts": format_num(user.get("edge_owner_to_timeline_media", {}).get("count", 0)),
+                            "following": format_num(user.get("edge_follow", {}).get("count", 0)),
+                            "pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
+                        }
+                return {"status": "banned"}
+
+            elif resp.status in [404, 400]:
+                # Account is banned/deactivated or not found
+                return {"status": "banned"}
+
+            elif resp.status in [429, 403]:
+                # Rate-limited or blocked, retry next round with another proxy
+                logging.warning(f"Rate limited ({resp.status}) for @{username} on proxy {proxy}")
+                return {"status": "rate_limited"}
+
+            return {"status": "unknown"}
+
     except Exception as e:
-        logging.error(f"Batch Error: {e}")
-    return found_accounts
+        logging.debug(f"Request error for @{username}: {e}")
+        return {"status": "error"}
 
 
 async def monitor_loop():
-    """Background monitoring loop for Unban and Ban alerts"""
+    """
+    Background loop checking batches of 10 accounts with 15-20s interval to prevent rate limits.
+    """
+    timeout = aiohttp.ClientTimeout(total=15)
     while True:
-        if monitored_accounts:
-            usernames = list(monitored_accounts.keys())
-            for i in range(0, len(usernames), 30):
-                batch = usernames[i:i+30]
-                live_accounts = await check_batch_accounts(batch)
+        try:
+            if monitored_accounts:
+                usernames = list(monitored_accounts.keys())
+                batch_size = 10
                 
-                for uname in batch:
-                    if uname not in monitored_accounts:
-                        continue
+                for i in range(0, len(usernames), batch_size):
+                    batch = usernames[i:i + batch_size]
+                    
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        tasks = [check_single_account(session, u) for u in batch]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    data = monitored_accounts[uname]
-                    raw_username = data.get("username", uname)
-                    chat_id = data["chat_id"]
-                    mode = data.get("mode", "unban")
+                    for uname, res in zip(batch, results):
+                        if isinstance(res, Exception) or not isinstance(res, dict):
+                            continue
 
-                    t = datetime.now() - data['start_time']
-                    h, r = divmod(int(t.total_seconds()), 3600)
-                    m, s = divmod(r, 60)
-                    elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
+                        if uname not in monitored_accounts:
+                            continue
 
-                    # UNBAN MODE: Trigger alert when account becomes LIVE
-                    if mode == "unban" and uname in live_accounts:
-                        ig = live_accounts[uname]
-                        msg = (
-                            f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
-                            f"<i>Followers: {ig['followers']} | Following: {ig['following']}</i>\n"
-                            f"⏱️ <i>Time taken: {elapsed_str}</i>"
-                        )
-                        try:
-                            card_img = await create_profile_card(raw_username, ig['followers'], ig['posts'], ig['following'], pic_url=ig['pic_url'], is_banned=False)
-                            await bot.send_photo(chat_id, photo=types.BufferedInputFile(card_img.read(), filename="card.png"), caption=msg)
-                        except Exception as e:
-                            logging.error(f"Error sending unban photo: {e}")
-                            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-                        
-                        del monitored_accounts[uname]
+                        data = monitored_accounts[uname]
+                        raw_username = data.get("username", uname)
+                        chat_id = data["chat_id"]
+                        mode = data.get("mode", "unban")
 
-                    # BAN MODE: Trigger alert when account is NO LONGER live
-                    elif mode == "ban" and uname not in live_accounts:
-                        msg = (
-                            f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
-                            f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
-                            f"<i>Status: UserNotFound</i>\n"
-                            f"⏱️ <i>Time taken: {elapsed_str}</i>"
-                        )
-                        try:
-                            card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
-                            await bot.send_photo(chat_id, photo=types.BufferedInputFile(card_img.read(), filename="card.png"), caption=msg)
-                        except Exception as e:
-                            logging.error(f"Error sending ban photo: {e}")
-                            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-                        
-                        del monitored_accounts[uname]
+                        t = datetime.now() - data["start_time"]
+                        h, r = divmod(int(t.total_seconds()), 3600)
+                        m, s = divmod(r, 60)
+                        elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
 
-        await asyncio.sleep(15)
+                        # UNBAN ALERT TRIGGER
+                        if mode == "unban" and res.get("status") == "active":
+                            msg = (
+                                f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
+                                f"<i>Followers: {res['followers']} | Following: {res['following']}</i>\n"
+                                f"⏱️ <i>Time taken: {elapsed_str}</i>"
+                            )
+                            try:
+                                card_img = await create_profile_card(
+                                    raw_username, res['followers'], res['posts'], res['following'],
+                                    pic_url=res.get('pic_url'), is_banned=False
+                                )
+                                await bot.send_photo(
+                                    chat_id,
+                                    photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
+                                    caption=msg
+                                )
+                            except Exception as e:
+                                logging.error(f"Error sending photo alert: {e}")
+                                await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
+
+                            del monitored_accounts[uname]
+
+                        # BAN ALERT TRIGGER
+                        elif mode == "ban" and res.get("status") == "banned":
+                            msg = (
+                                f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
+                                f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
+                                f"<i>Status: UserNotFound</i>\n"
+                                f"⏱️ <i>Time taken: {elapsed_str}</i>"
+                            )
+                            try:
+                                card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
+                                await bot.send_photo(
+                                    chat_id,
+                                    photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
+                                    caption=msg
+                                )
+                            except Exception as e:
+                                logging.error(f"Error sending ban photo alert: {e}")
+                                await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
+
+                            del monitored_accounts[uname]
+
+                    # 15-20 second polite delay between batches
+                    await asyncio.sleep(random.uniform(15, 20))
+
+            else:
+                await asyncio.sleep(5)
+
+        except Exception as e:
+            logging.error(f"Unexpected error in monitor loop: {e}")
+            await asyncio.sleep(10)
 
 
 @dp.message(Command("start"))
 @dp.message(Command("help"))
 async def start_cmd(message: types.Message):
     welcome_text = (
-        "🤖 <b>Truzd Instagram Monitor Bot</b>\n\n"
+        "🤖 <b>Zero-Cost Instagram Monitor Bot</b>\n\n"
         "Commands:\n"
         "• <code>/monitor &lt;username&gt;</code> — Track single IG account for UNBAN.\n"
         "• <code>/banmonitor &lt;username&gt;</code> — Track active IG account for BAN.\n"
-        "• <code>/bulk &lt;user1&gt; &lt;user2&gt; ...</code> — Add multiple IG accounts at once.\n"
-        "• <code>/stop &lt;username&gt;</code> — Stop monitoring a username.\n"
-        "• <code>/active</code> — View all active monitoring tasks."
+        "• <code>/bulk user1, user2 ...</code> — Bulk track accounts.\n"
+        "• <code>/stop &lt;username&gt;</code> — Stop tracking.\n"
+        "• <code>/active</code> — View running monitors."
     )
     await message.answer(welcome_text)
 
@@ -375,13 +452,13 @@ async def show_active(message: types.Message):
         elapsed = datetime.now() - t["start_time"]
         h, r = divmod(int(elapsed.total_seconds()), 3600)
         m, s = divmod(r, 60)
-        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {h}h {m}s")
+        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {h}h {m}m {s}s")
 
     await message.answer("\n".join(lines))
 
 
 async def main():
-    print("⚡ Truzd Monitor Bot is Live with Bundled TTF Font & Dynamic Cards!")
+    print("🚀 Zero-Cost Instagram Monitor Bot is starting...")
     asyncio.create_task(monitor_loop())
     await dp.start_polling(bot)
 
