@@ -26,12 +26,12 @@ if not BOT_TOKEN or ":" not in BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
-# Active monitoring jobs
+# Storage for active monitoring tasks
 active_monitors = {}
 
 
 def format_followers(count) -> str:
-    """Format follower numbers as 710.0k, 10.2k, 3.0m, etc."""
+    """Format follower numbers as 710.0k, 101.0k, 3.0m, etc."""
     try:
         num = float(count)
         if num >= 1_000_000:
@@ -43,7 +43,7 @@ def format_followers(count) -> str:
         else:
             return f"{int(num)}"
     except (ValueError, TypeError):
-        return str(count)
+        return "0"
 
 
 def check_instagram_status(username: str) -> dict:
@@ -85,15 +85,14 @@ def check_instagram_status(username: str) -> dict:
             if "Page Not Found" in html or "unavailable" in html or "isn't available" in html:
                 return {"is_active": False, "followers": "0"}
             m = re.search(r'([\d\.,KkMm]+)\s+Followers', html)
-            followers = m.group(1) if m else "Active"
-            return {"is_active": True, "followers": followers}
+            followers = m.group(1) if m else "0"
+            return {"is_active": True, "followers": format_followers(followers)}
         elif res_embed.status_code in [404, 400]:
             return {"is_active": False, "followers": "0"}
     except Exception as e:
         logging.error(f"Embed check error for {username}: {e}")
 
-    # Default fallback: Treat as unbanned/active if status cannot be confirmed as 404
-    return {"is_active": True, "followers": "Active"}
+    return {"is_active": True, "followers": "0"}
 
 
 def format_duration(seconds: float) -> str:
@@ -120,20 +119,19 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['monitor'])
 def handle_monitor(message):
-    args = message.text.split()[1:]
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         bot.reply_to(message, "❌ Usage: `/monitor <username>`")
         return
 
-    username = args[0].replace("@", "").strip().lower()
+    username = args[1].replace("@", "").strip()
     chat_id = message.chat.id
-    task_key = f"{chat_id}_{username}"
+    task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
         bot.reply_to(message, f"⚠️ Already monitoring @{username}!")
         return
 
-    status = check_instagram_status(username)
     bot.reply_to(message, f"🔍 **Monitoring @{username} started!**")
 
     stop_event = threading.Event()
@@ -145,7 +143,10 @@ def handle_monitor(message):
             st = check_instagram_status(username)
             if st["is_active"]:
                 elapsed = format_duration(time.time() - start_time)
+                
+                # Zero-width preview link at top to force Telegram Instagram Profile Card Preview!
                 alert_msg = (
+                    f"[⁠](https://www.instagram.com/{username}/)"
                     f"✅ **Username unbanned!**\n\n"
                     f"@{username} is now active again — [View Profile](https://instagram.com/{username})\n"
                     f"Followers: {st['followers']}\n"
@@ -162,14 +163,14 @@ def handle_monitor(message):
 
 @bot.message_handler(commands=['banmonitor'])
 def handle_banmonitor(message):
-    args = message.text.split()[1:]
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         bot.reply_to(message, "❌ Usage: `/banmonitor <username>`")
         return
 
-    username = args[0].replace("@", "").strip().lower()
+    username = args[1].replace("@", "").strip()
     chat_id = message.chat.id
-    task_key = f"{chat_id}_{username}"
+    task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
         bot.reply_to(message, f"⚠️ Already monitoring @{username}!")
@@ -187,6 +188,7 @@ def handle_banmonitor(message):
             if not st["is_active"]:
                 elapsed = format_duration(time.time() - start_time)
                 alert_msg = (
+                    f"[⁠](https://www.instagram.com/{username}/)"
                     f"🚨 **Super-Fast Ban Alert!**\n\n"
                     f"@{username} has been **BANNED/DISABLED**!\n"
                     f"Time elapsed: {elapsed}\n\n"
@@ -203,21 +205,21 @@ def handle_banmonitor(message):
 
 @bot.message_handler(commands=['bulk'])
 def handle_bulk(message):
-    args = message.text.split()[1:]
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         bot.reply_to(message, "❌ Usage: `/bulk user1 user2 user3`")
         return
 
-    raw_input = " ".join(args)
+    raw_input = args[1]
     raw_list = raw_input.replace(",", " ").split()
-    usernames = list(dict.fromkeys([u.replace("@", "").strip().lower() for u in raw_list if u.strip()]))
+    usernames = list(dict.fromkeys([u.replace("@", "").strip() for u in raw_list if u.strip()]))
 
     chat_id = message.chat.id
     started = []
     skipped = []
 
     for username in usernames:
-        task_key = f"{chat_id}_{username}"
+        task_key = f"{chat_id}_{username.lower()}"
         if task_key in active_monitors:
             skipped.append(f"@{username} (Already monitoring)")
             continue
@@ -232,6 +234,7 @@ def handle_bulk(message):
                 if st["is_active"]:
                     elapsed = format_duration(time.time() - st_time)
                     alert_msg = (
+                        f"[⁠](https://www.instagram.com/{u}/)"
                         f"✅ **Username unbanned!**\n\n"
                         f"@{u} is now active again — [View Profile](https://instagram.com/{u})\n"
                         f"Followers: {st['followers']}\n"
@@ -257,14 +260,14 @@ def handle_bulk(message):
 
 @bot.message_handler(commands=['stop'])
 def handle_stop(message):
-    args = message.text.split()[1:]
-    if not args:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         bot.reply_to(message, "❌ Usage: `/stop <username>`")
         return
 
-    username = args[0].replace("@", "").strip().lower()
+    username = args[1].replace("@", "").strip()
     chat_id = message.chat.id
-    task_key = f"{chat_id}_{username}"
+    task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
         active_monitors[task_key]["event"].set()
