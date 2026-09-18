@@ -24,7 +24,6 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 # Monitored accounts dictionary
-# Key: username.lower(), Value: {"username": raw_username, "chat_id": int, "start_time": datetime, "mode": "unban"|"ban"}
 monitored_accounts = {}
 
 
@@ -42,27 +41,76 @@ def format_num(count):
         return str(count)
 
 
-async def create_profile_card(username, followers, posts, following, pic_url):
-    """Creates an Instagram profile preview card image using PIL"""
-    img = Image.new('RGB', (600, 200), color='#1c1b22')
+async def create_profile_card(username, followers, posts, following, pic_url, status_title="✅ UNBANNED"):
+    """Creates a high-resolution 800x420 modern dark profile card for Telegram alerts"""
+    width, height = 800, 420
+    img = Image.new('RGB', (width, height), color='#0f0e17')
     draw = ImageDraw.Draw(img)
-    
+
+    # Rounded outer card container
+    draw.rounded_rectangle([15, 15, width-15, height-15], radius=24, fill='#161522', outline='#2a283e', width=2)
+
+    # Top Right Status Badge
+    badge_bg = '#1b3a2b' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#451a1a'
+    badge_border = '#22c55e' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#ef4444'
+    badge_text_color = '#4ade80' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#f87171'
+
+    draw.rounded_rectangle([width-200, 40, width-40, 85], radius=12, fill=badge_bg, outline=badge_border, width=1)
+    draw.text((width-180, 52), status_title, fill=badge_text_color)
+
+    # Avatar ring (Story Gradient simulation)
+    avatar_center = (130, 210)
+    avatar_radius = 75
+    draw.ellipse([avatar_center[0]-avatar_radius-6, avatar_center[1]-avatar_radius-6, 
+                   avatar_center[0]+avatar_radius+6, avatar_center[1]+avatar_radius+6], 
+                  outline='#ec4899', width=4)
+
+    # Download and draw circular avatar if pic_url provided
+    avatar_drawn = False
     if pic_url:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(pic_url, timeout=5) as resp:
                     if resp.status == 200:
                         avatar_bytes = await resp.read()
-                        avatar = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize((100, 100))
-                        mask = Image.new('L', (100, 100), 0)
-                        ImageDraw.Draw(mask).ellipse((0, 0, 100, 100), fill=255)
-                        img.paste(avatar, (50, 50), mask)
+                        av_img = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize((150, 150))
+                        mask = Image.new('L', (150, 150), 0)
+                        ImageDraw.Draw(mask).ellipse((0, 0, 150, 150), fill=255)
+                        img.paste(av_img, (avatar_center[0]-avatar_radius, avatar_center[1]-avatar_radius), mask)
+                        avatar_drawn = True
         except Exception as e:
             logging.error(f"Avatar download error: {e}")
 
-    draw.text((170, 50), f"@{username}", fill="white")
-    draw.text((170, 105), f"{posts} posts    {followers} followers    {following} following", fill="#b0b0b0")
-    
+    if not avatar_drawn:
+        draw.ellipse([avatar_center[0]-avatar_radius, avatar_center[1]-avatar_radius, 
+                       avatar_center[0]+avatar_radius, avatar_center[1]+avatar_radius], 
+                      fill='#2e2b45')
+        first_char = username[0].upper() if username else 'U'
+        draw.text((avatar_center[0]-10, avatar_center[1]-10), first_char, fill='#ffffff')
+
+    # Username & Title
+    draw.text((240, 105), f"@{username}", fill='#ffffff')
+    draw.text((240, 150), 'Instagram Account Monitoring Alert', fill='#a1a1aa')
+
+    # Stats Grid Boxes (3 Pills: Posts, Followers, Following)
+    box_y_top = 230
+    box_y_bottom = 340
+
+    # Posts Pill
+    draw.rounded_rectangle([240, box_y_top, 390, box_y_bottom], radius=16, fill='#201e30', outline='#312e48', width=1)
+    draw.text((285, box_y_top + 25), str(posts), fill='#ffffff')
+    draw.text((275, box_y_top + 65), 'POSTS', fill='#94a3b8')
+
+    # Followers Pill (Highlighted)
+    draw.rounded_rectangle([410, box_y_top, 570, box_y_bottom], radius=16, fill='#201e30', outline='#3b82f6', width=2)
+    draw.text((450, box_y_top + 25), str(followers), fill='#38bdf8')
+    draw.text((440, box_y_top + 65), 'FOLLOWERS', fill='#94a3b8')
+
+    # Following Pill
+    draw.rounded_rectangle([590, box_y_top, 740, box_y_bottom], radius=16, fill='#201e30', outline='#312e48', width=1)
+    draw.text((645, box_y_top + 25), str(following), fill='#ffffff')
+    draw.text((625, box_y_top + 65), 'FOLLOWING', fill='#94a3b8')
+
     bio = BytesIO()
     img.save(bio, 'PNG')
     bio.seek(0)
@@ -75,7 +123,7 @@ async def check_batch_accounts(usernames_list):
     found_accounts = {}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, json={"usernames": usernames_list}, timeout=30) as response:
+            async with session.post(API_URL, json={"usernames": usernames_list}, timeout=35) as response:
                 if response.status in [200, 201]:
                     data = await response.json()
                     for item in data:
@@ -102,7 +150,7 @@ async def monitor_loop():
     while True:
         if monitored_accounts:
             usernames = list(monitored_accounts.keys())
-            for i in range(0, len(usernames), 30):  # Process in batches of 30
+            for i in range(0, len(usernames), 30):
                 batch = usernames[i:i+30]
                 live_accounts = await check_batch_accounts(batch)
                 
@@ -130,7 +178,7 @@ async def monitor_loop():
                             f"Time elapsed: {elapsed_str}"
                         )
                         try:
-                            card_img = await create_profile_card(raw_username, ig['followers'], ig['posts'], ig['following'], ig['pic_url'])
+                            card_img = await create_profile_card(raw_username, ig['followers'], ig['posts'], ig['following'], ig['pic_url'], status_title="✅ UNBANNED")
                             await bot.send_photo(chat_id, photo=types.BufferedInputFile(card_img.read(), filename="card.png"), caption=msg)
                         except Exception as e:
                             logging.error(f"Error sending unban photo: {e}")
@@ -153,7 +201,6 @@ async def monitor_loop():
                         
                         del monitored_accounts[uname]
 
-        # Polling interval
         await asyncio.sleep(15)
 
 
@@ -278,7 +325,7 @@ async def show_active(message: types.Message):
 
 
 async def main():
-    print("⚡ Truzd Monitor Bot is Live with Apify & Custom Cards!")
+    print("⚡ Truzd Monitor Bot is Live with High-Res Profile Cards!")
     asyncio.create_task(monitor_loop())
     await dp.start_polling(bot)
 
