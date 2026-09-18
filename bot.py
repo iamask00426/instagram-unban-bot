@@ -2,8 +2,12 @@ import os
 import asyncio
 import aiohttp
 import logging
+import sys
+import json
+import re
+import html
 from datetime import datetime
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from dotenv import load_dotenv
 
@@ -23,8 +27,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Monitored accounts dictionary
 monitored_accounts = {}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
 
 
 def format_num(count):
@@ -41,75 +46,108 @@ def format_num(count):
         return str(count)
 
 
-async def create_profile_card(username, followers, posts, following, pic_url, status_title="✅ UNBANNED"):
-    """Creates a high-resolution 800x420 modern dark profile card for Telegram alerts"""
-    width, height = 800, 420
-    img = Image.new('RGB', (width, height), color='#0f0e17')
+async def create_profile_card(username, followers, posts, following, pic_url=None, is_banned=False):
+    """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
+    width, height = 1000, 550
+    img = Image.new('RGB', (width, height), color='#000000')
     draw = ImageDraw.Draw(img)
 
-    # Rounded outer card container
-    draw.rounded_rectangle([15, 15, width-15, height-15], radius=24, fill='#161522', outline='#2a283e', width=2)
+    try:
+        font_username = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 48)
+        font_btn = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 26)
+        font_stats_num = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 34)
+        font_stats_lbl = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 30)
+        font_name = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 32)
+    except Exception:
+        font_username = font_btn = font_stats_num = font_stats_lbl = font_name = ImageFont.load_default()
 
-    # Top Right Status Badge
-    badge_bg = '#1b3a2b' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#451a1a'
-    badge_border = '#22c55e' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#ef4444'
-    badge_text_color = '#4ade80' if "UNBANNED" in status_title or "ACTIVE" in status_title else '#f87171'
+    av_center = (180, 275)
+    av_r = 100
+    av_size = (av_r * 2, av_r * 2)
 
-    draw.rounded_rectangle([width-200, 40, width-40, 85], radius=12, fill=badge_bg, outline=badge_border, width=1)
-    draw.text((width-180, 52), status_title, fill=badge_text_color)
-
-    # Avatar ring (Story Gradient simulation)
-    avatar_center = (130, 210)
-    avatar_radius = 75
-    draw.ellipse([avatar_center[0]-avatar_radius-6, avatar_center[1]-avatar_radius-6, 
-                   avatar_center[0]+avatar_radius+6, avatar_center[1]+avatar_radius+6], 
-                  outline='#ec4899', width=4)
-
-    # Download and draw circular avatar if pic_url provided
     avatar_drawn = False
-    if pic_url:
+
+    # For BANNED account, always use default_banned_dp.jpg!
+    if is_banned and os.path.exists(DEFAULT_BANNED_DP_PATH):
+        try:
+            dp_img = Image.open(DEFAULT_BANNED_DP_PATH).convert("RGB").resize(av_size)
+            mask = Image.new('L', av_size, 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, av_size[0], av_size[1]), fill=255)
+            img.paste(dp_img, (av_center[0]-av_r, av_center[1]-av_r), mask)
+            avatar_drawn = True
+        except Exception as e:
+            logging.error(f"Error loading default banned DP: {e}")
+
+    # If unbanned & has pic_url, download avatar
+    if not avatar_drawn and pic_url:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(pic_url, timeout=5) as resp:
                     if resp.status == 200:
                         avatar_bytes = await resp.read()
-                        av_img = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize((150, 150))
-                        mask = Image.new('L', (150, 150), 0)
-                        ImageDraw.Draw(mask).ellipse((0, 0, 150, 150), fill=255)
-                        img.paste(av_img, (avatar_center[0]-avatar_radius, avatar_center[1]-avatar_radius), mask)
+                        av_img = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize(av_size)
+                        mask = Image.new('L', av_size, 0)
+                        ImageDraw.Draw(mask).ellipse((0, 0, av_size[0], av_size[1]), fill=255)
+                        img.paste(av_img, (av_center[0]-av_r, av_center[1]-av_r), mask)
                         avatar_drawn = True
         except Exception as e:
             logging.error(f"Avatar download error: {e}")
 
     if not avatar_drawn:
-        draw.ellipse([avatar_center[0]-avatar_radius, avatar_center[1]-avatar_radius, 
-                       avatar_center[0]+avatar_radius, avatar_center[1]+avatar_radius], 
-                      fill='#2e2b45')
+        draw.ellipse([av_center[0]-av_r, av_center[1]-av_r, av_center[0]+av_r, av_center[1]+av_r], fill='#262626')
         first_char = username[0].upper() if username else 'U'
-        draw.text((avatar_center[0]-10, avatar_center[1]-10), first_char, fill='#ffffff')
+        draw.text((av_center[0]-15, av_center[1]-25), first_char, font=font_username, fill='#ffffff')
 
-    # Username & Title
-    draw.text((240, 105), f"@{username}", fill='#ffffff')
-    draw.text((240, 150), 'Instagram Account Monitoring Alert', fill='#a1a1aa')
+    # Username Title
+    display_username = username if not is_banned else "UserNotFound"
+    uname_x = 320
+    uname_y = 200
+    draw.text((uname_x, uname_y), display_username, font=font_username, fill='#ffffff')
 
-    # Stats Grid Boxes (3 Pills: Posts, Followers, Following)
-    box_y_top = 230
-    box_y_bottom = 340
+    # DYNAMIC LAYOUT MATH FOR BUTTON & DOTS (ZERO OVERLAP!)
+    try:
+        uname_w = draw.textlength(display_username, font=font_username)
+    except Exception:
+        uname_w = len(display_username) * 28
 
-    # Posts Pill
-    draw.rounded_rectangle([240, box_y_top, 390, box_y_bottom], radius=16, fill='#201e30', outline='#312e48', width=1)
-    draw.text((285, box_y_top + 25), str(posts), fill='#ffffff')
-    draw.text((275, box_y_top + 65), 'POSTS', fill='#94a3b8')
+    btn_left = int(uname_x + uname_w + 25)
+    btn_top = 205
+    btn_w = 130
+    btn_h = 50
+    draw.rounded_rectangle([btn_left, btn_top, btn_left+btn_w, btn_top+btn_h], radius=10, fill='#0095f6')
+    draw.text((btn_left+26, btn_top+10), 'Follow', font=font_btn, fill='#ffffff')
 
-    # Followers Pill (Highlighted)
-    draw.rounded_rectangle([410, box_y_top, 570, box_y_bottom], radius=16, fill='#201e30', outline='#3b82f6', width=2)
-    draw.text((450, box_y_top + 25), str(followers), fill='#38bdf8')
-    draw.text((440, box_y_top + 65), 'FOLLOWERS', fill='#94a3b8')
+    dot_x = btn_left + btn_w + 25
+    dot_y = btn_top + 22
+    for offset in [0, 14, 28]:
+        draw.ellipse([dot_x+offset, dot_y, dot_x+offset+7, dot_y+7], fill='#ffffff')
 
-    # Following Pill
-    draw.rounded_rectangle([590, box_y_top, 740, box_y_bottom], radius=16, fill='#201e30', outline='#312e48', width=1)
-    draw.text((645, box_y_top + 25), str(following), fill='#ffffff')
-    draw.text((625, box_y_top + 65), 'FOLLOWING', fill='#94a3b8')
+    # Stats Line
+    posts_str = str(posts)
+    folls_str = str(followers)
+    follg_str = str(following)
+    st_y = 275
+    st_lbl_y = 278
+
+    draw.text((320, st_y), posts_str, font=font_stats_num, fill='#ffffff')
+    pw = draw.textlength(posts_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(posts_str)*20
+    draw.text((320 + pw + 10, st_lbl_y), 'posts', font=font_stats_lbl, fill='#a8a8a8')
+    pw_lbl = draw.textlength('posts', font=font_stats_lbl) if hasattr(draw, 'textlength') else 75
+
+    foll_x = int(320 + pw + 10 + pw_lbl + 35)
+    draw.text((foll_x, st_y), folls_str, font=font_stats_num, fill='#ffffff')
+    fw = draw.textlength(folls_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(folls_str)*20
+    draw.text((foll_x + fw + 10, st_lbl_y), 'followers', font=font_stats_lbl, fill='#a8a8a8')
+    fw_lbl = draw.textlength('followers', font=font_stats_lbl) if hasattr(draw, 'textlength') else 120
+
+    follg_x = int(foll_x + fw + 10 + fw_lbl + 35)
+    draw.text((follg_x, st_y), follg_str, font=font_stats_num, fill='#ffffff')
+    fgw = draw.textlength(follg_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(follg_str)*20
+    draw.text((follg_x + fgw + 10, st_lbl_y), 'following', font=font_stats_lbl, fill='#a8a8a8')
+
+    # Subtitle Name
+    sub_title = username if not is_banned else "UserNotFound"
+    draw.text((320, 330), sub_title, font=font_name, fill='#ffffff')
 
     bio = BytesIO()
     img.save(bio, 'PNG')
@@ -166,19 +204,18 @@ async def monitor_loop():
                     t = datetime.now() - data['start_time']
                     h, r = divmod(int(t.total_seconds()), 3600)
                     m, s = divmod(r, 60)
-                    elapsed_str = f"{h}h {m}m {s}s"
+                    elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
 
                     # UNBAN MODE: Trigger alert when account becomes LIVE
                     if mode == "unban" and uname in live_accounts:
                         ig = live_accounts[uname]
                         msg = (
-                            f"✅ <b>Username unbanned!</b>\n\n"
-                            f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> is now active again — <a href='https://instagram.com/{raw_username}'>View Profile</a>\n"
-                            f"Followers: {ig['followers']}\n"
-                            f"Time elapsed: {elapsed_str}"
+                            f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
+                            f"<i>Followers: {ig['followers']} | Following: {ig['following']}</i>\n"
+                            f"⏱️ <i>Time taken: {elapsed_str}</i>"
                         )
                         try:
-                            card_img = await create_profile_card(raw_username, ig['followers'], ig['posts'], ig['following'], ig['pic_url'], status_title="✅ UNBANNED")
+                            card_img = await create_profile_card(raw_username, ig['followers'], ig['posts'], ig['following'], pic_url=ig['pic_url'], is_banned=False)
                             await bot.send_photo(chat_id, photo=types.BufferedInputFile(card_img.read(), filename="card.png"), caption=msg)
                         except Exception as e:
                             logging.error(f"Error sending unban photo: {e}")
@@ -191,13 +228,15 @@ async def monitor_loop():
                         msg = (
                             f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
                             f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
-                            f"Time elapsed: {elapsed_str}\n\n"
-                            f"🔗 <a href='https://instagram.com/{raw_username}'>View Profile</a>"
+                            f"<i>Status: UserNotFound</i>\n"
+                            f"⏱️ <i>Time taken: {elapsed_str}</i>"
                         )
                         try:
-                            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
+                            card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
+                            await bot.send_photo(chat_id, photo=types.BufferedInputFile(card_img.read(), filename="card.png"), caption=msg)
                         except Exception as e:
-                            logging.error(f"Error sending ban alert: {e}")
+                            logging.error(f"Error sending ban photo: {e}")
+                            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
                         
                         del monitored_accounts[uname]
 
@@ -325,7 +364,7 @@ async def show_active(message: types.Message):
 
 
 async def main():
-    print("⚡ Truzd Monitor Bot is Live with High-Res Profile Cards!")
+    print("⚡ Truzd Monitor Bot is Live with Official Default Banned DP & Dynamic Layout!")
     asyncio.create_task(monitor_loop())
     await dp.start_polling(bot)
 
