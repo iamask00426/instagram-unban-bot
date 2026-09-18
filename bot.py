@@ -19,7 +19,6 @@ logging.basicConfig(
 
 if not BOT_TOKEN or ":" not in BOT_TOKEN:
     logging.error("❌ ERROR: BOT_TOKEN is missing or invalid in Environment Variables!")
-    logging.error("👉 Please go to Railway Dashboard -> Variables tab -> Add BOT_TOKEN = your_bot_token_from_botfather")
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
@@ -29,33 +28,47 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 active_monitors = {}
 
 
+def format_followers(count) -> str:
+    """Format follower numbers as 710.0k, 10.2k, 3.0m, etc."""
+    try:
+        num = float(count)
+        if num >= 1_000_000:
+            return f"{num / 1_000_000:.1f}m"
+        elif num >= 1_000:
+            return f"{num / 1_000:.1f}k"
+        else:
+            return f"{int(num)}"
+    except (ValueError, TypeError):
+        return str(count)
+
+
 def check_instagram_status(username: str) -> dict:
-    url = f"https://www.instagram.com/{username}/?__a=1&__d=dis"
+    """
+    Check if Instagram account is active or banned.
+    Returns: {'is_active': bool, 'followers': str}
+    """
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; Samsung; SM-G998B; qcom; en_US; 454749221)",
+        "X-IG-App-ID": "936619743392459",
         "Accept": "*/*",
     }
     
     try:
         response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
-            followers = "Active"
-            try:
-                data = response.json()
-                user = data.get("graphql", {}).get("user", {}) or data.get("data", {}).get("user", {})
-                follower_count = user.get("edge_followed_by", {}).get("count")
-                if follower_count is not None:
-                    followers = f"{follower_count:,}"
-            except Exception:
-                pass
-            return {"is_active": True, "followers": followers, "status_code": 200}
-        elif response.status_code in [404, 400]:
-            return {"is_active": False, "followers": "0", "status_code": response.status_code}
+            data = response.json()
+            user = data.get("data", {}).get("user")
+            if user:
+                count = user.get("edge_followed_by", {}).get("count", 0)
+                return {"is_active": True, "followers": format_followers(count)}
+            return {"is_active": True, "followers": "0"}
         else:
-            return {"is_active": True, "followers": "Unknown", "status_code": response.status_code}
+            # 404, 400, 403 or non-200 -> Banned / Disabled
+            return {"is_active": False, "followers": "0"}
     except Exception as e:
         logging.error(f"Error checking status for {username}: {e}")
-        return {"is_active": True, "followers": "Unknown", "status_code": 0}
+        return {"is_active": False, "followers": "0"}
 
 
 def format_duration(seconds: float) -> str:
@@ -100,7 +113,7 @@ def handle_monitor(message):
         bot.reply_to(message, f"ℹ️ @{username} is already active! Use `/banmonitor` if you want to track bans.")
         return
 
-    bot.reply_to(message, f"🔍 **Monitoring @{username} started!** (Waiting for Unban)")
+    bot.reply_to(message, f"🔍 **Monitoring @{username} started!**")
 
     stop_event = threading.Event()
     start_time = time.time()
@@ -113,7 +126,7 @@ def handle_monitor(message):
                 elapsed = format_duration(time.time() - start_time)
                 alert_msg = (
                     f"✅ **Username unbanned!**\n\n"
-                    f"@{username} is active again — [View Profile](https://instagram.com/{username})\n"
+                    f"@{username} is now active again — [View Profile](https://instagram.com/{username})\n"
                     f"Followers: {st['followers']}\n"
                     f"Time elapsed: {elapsed}"
                 )
@@ -209,7 +222,7 @@ def handle_bulk(message):
                     elapsed = format_duration(time.time() - st_time)
                     alert_msg = (
                         f"✅ **Username unbanned!**\n\n"
-                        f"@{u} is active again — [View Profile](https://instagram.com/{u})\n"
+                        f"@{u} is now active again — [View Profile](https://instagram.com/{u})\n"
                         f"Followers: {st['followers']}\n"
                         f"Time elapsed: {elapsed}"
                     )
