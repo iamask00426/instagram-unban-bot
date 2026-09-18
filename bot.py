@@ -316,11 +316,81 @@ async def check_single_account(session: aiohttp.ClientSession, username: str) ->
         return {"status": "error"}
 
 
+async def trigger_alert(uname: str, raw_username: str, chat_id: int, mode: str, res: dict, start_time: datetime):
+    """Processes detection result and sends high-res pure black alert card immediately."""
+    t = datetime.now() - start_time
+    h, r = divmod(int(t.total_seconds()), 3600)
+    m, s = divmod(r, 60)
+    elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
+
+    # UNBAN ALERT TRIGGER
+    if mode == "unban" and res.get("status") == "active":
+        msg = (
+            f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
+            f"<i>Followers: {res['followers']} | Following: {res['following']}</i>\n"
+            f"⏱️ <i>Time taken: {elapsed_str}</i>"
+        )
+        try:
+            card_img = await create_profile_card(
+                raw_username, res['followers'], res['posts'], res['following'],
+                pic_url=res.get('pic_url'), is_banned=False
+            )
+            await bot.send_photo(
+                chat_id,
+                photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
+                caption=msg
+            )
+        except Exception as e:
+            logging.error(f"Error sending photo alert: {e}")
+            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
+
+        if uname in monitored_accounts:
+            del monitored_accounts[uname]
+        return True
+
+    # BAN ALERT TRIGGER
+    elif mode == "ban" and res.get("status") == "banned":
+        msg = (
+            f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
+            f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
+            f"<i>Status: UserNotFound</i>\n"
+            f"⏱️ <i>Time taken: {elapsed_str}</i>"
+        )
+        try:
+            card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
+            await bot.send_photo(
+                chat_id,
+                photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
+                caption=msg
+            )
+        except Exception as e:
+            logging.error(f"Error sending ban photo alert: {e}")
+            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
+
+        if uname in monitored_accounts:
+            del monitored_accounts[uname]
+        return True
+
+    return False
+
+
+async def run_instant_check(key: str, raw_username: str, chat_id: int, mode: str, start_time: datetime):
+    """Executes an instant check within 1-2 seconds of user command."""
+    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            res = await check_single_account(session, raw_username)
+            if isinstance(res, dict) and key in monitored_accounts:
+                await trigger_alert(key, raw_username, chat_id, mode, res, start_time)
+    except Exception as e:
+        logging.debug(f"Instant check error for @{raw_username}: {e}")
+
+
 async def monitor_loop():
     """
-    Background loop checking batches of 10 accounts with 15-20s interval to prevent rate limits.
+    Continuous ultra-fast background loop checking accounts every 1-2 seconds with rotating proxies.
     """
-    timeout = aiohttp.ClientTimeout(total=15)
+    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
     while True:
         try:
             if monitored_accounts:
@@ -342,68 +412,24 @@ async def monitor_loop():
                             continue
 
                         data = monitored_accounts[uname]
-                        raw_username = data.get("username", uname)
-                        chat_id = data["chat_id"]
-                        mode = data.get("mode", "unban")
+                        await trigger_alert(
+                            uname,
+                            data.get("username", uname),
+                            data["chat_id"],
+                            data.get("mode", "unban"),
+                            res,
+                            data["start_time"]
+                        )
 
-                        t = datetime.now() - data["start_time"]
-                        h, r = divmod(int(t.total_seconds()), 3600)
-                        m, s = divmod(r, 60)
-                        elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
-
-                        # UNBAN ALERT TRIGGER
-                        if mode == "unban" and res.get("status") == "active":
-                            msg = (
-                                f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
-                                f"<i>Followers: {res['followers']} | Following: {res['following']}</i>\n"
-                                f"⏱️ <i>Time taken: {elapsed_str}</i>"
-                            )
-                            try:
-                                card_img = await create_profile_card(
-                                    raw_username, res['followers'], res['posts'], res['following'],
-                                    pic_url=res.get('pic_url'), is_banned=False
-                                )
-                                await bot.send_photo(
-                                    chat_id,
-                                    photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
-                                    caption=msg
-                                )
-                            except Exception as e:
-                                logging.error(f"Error sending photo alert: {e}")
-                                await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-
-                            del monitored_accounts[uname]
-
-                        # BAN ALERT TRIGGER
-                        elif mode == "ban" and res.get("status") == "banned":
-                            msg = (
-                                f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
-                                f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
-                                f"<i>Status: UserNotFound</i>\n"
-                                f"⏱️ <i>Time taken: {elapsed_str}</i>"
-                            )
-                            try:
-                                card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
-                                await bot.send_photo(
-                                    chat_id,
-                                    photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
-                                    caption=msg
-                                )
-                            except Exception as e:
-                                logging.error(f"Error sending ban photo alert: {e}")
-                                await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-
-                            del monitored_accounts[uname]
-
-                    # 15-20 second polite delay between batches
-                    await asyncio.sleep(random.uniform(15, 20))
+                    # Ultra-fast 1 to 2 second delay between batches
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
 
             else:
-                await asyncio.sleep(5)
+                await asyncio.sleep(0.5)
 
         except Exception as e:
             logging.error(f"Unexpected error in monitor loop: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(1)
 
 
 @dp.message(Command("start"))
@@ -434,13 +460,16 @@ async def add_monitor(message: types.Message):
     if key in monitored_accounts:
         return await message.answer(f"⚠️ Already monitoring <b>@{username}</b>!")
 
+    start_time = datetime.now()
     monitored_accounts[key] = {
         "username": username,
         "chat_id": message.chat.id,
-        "start_time": datetime.now(),
+        "start_time": start_time,
         "mode": "unban"
     }
     await message.answer(f"⚡ Super-fast monitoring active for <b>@{username}</b>!")
+    # Instant background check within seconds
+    asyncio.create_task(run_instant_check(key, username, message.chat.id, "unban", start_time))
 
 
 @dp.message(Command("banmonitor"))
@@ -456,13 +485,16 @@ async def add_banmonitor(message: types.Message):
     if key in monitored_accounts:
         return await message.answer(f"⚠️ Already monitoring <b>@{username}</b>!")
 
+    start_time = datetime.now()
     monitored_accounts[key] = {
         "username": username,
         "chat_id": message.chat.id,
-        "start_time": datetime.now(),
+        "start_time": start_time,
         "mode": "ban"
     }
     await message.answer(f"🚨 Ban monitoring active for <b>@{username}</b>!")
+    # Instant background check within seconds
+    asyncio.create_task(run_instant_check(key, username, message.chat.id, "ban", start_time))
 
 
 @dp.message(Command("bulk"))
@@ -478,13 +510,16 @@ async def add_bulk(message: types.Message):
         uname = u.split("instagram.com/")[-1].replace("/", "").replace("@", "").strip()
         key = uname.lower()
         if uname and key not in monitored_accounts:
+            st = datetime.now()
             monitored_accounts[key] = {
                 "username": uname,
                 "chat_id": message.chat.id,
-                "start_time": datetime.now(),
+                "start_time": st,
                 "mode": "unban"
             }
             added.append(f"@{uname}")
+            # Instant background check
+            asyncio.create_task(run_instant_check(key, uname, message.chat.id, "unban", st))
 
     if added:
         await message.answer(f"⚡ <b>{len(added)} accounts added for tracking!</b>\n" + ", ".join(added))
