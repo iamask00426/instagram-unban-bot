@@ -3,6 +3,8 @@ import time
 import threading
 import logging
 import sys
+import json
+import re
 import requests
 from dotenv import load_dotenv
 import telebot
@@ -11,6 +13,7 @@ import telebot
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -24,7 +27,6 @@ if not BOT_TOKEN or ":" not in BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 # Active monitoring jobs
-# Key: f"{chat_id}_{username}", Value: {'event': threading.Event, 'mode': 'unban'|'ban', 'start_time': float, 'username': str}
 active_monitors = {}
 
 
@@ -33,9 +35,11 @@ def format_followers(count) -> str:
     try:
         num = float(count)
         if num >= 1_000_000:
-            return f"{num / 1_000_000:.1f}m"
+            val = num / 1_000_000
+            return f"{val:.1f}m" if val % 1 != 0 else f"{int(val)}m"
         elif num >= 1_000:
-            return f"{num / 1_000:.1f}k"
+            val = num / 1_000
+            return f"{val:.1f}k" if val % 1 != 0 else f"{int(val)}k"
         else:
             return f"{int(num)}"
     except (ValueError, TypeError):
@@ -44,31 +48,52 @@ def format_followers(count) -> str:
 
 def check_instagram_status(username: str) -> dict:
     """
-    Check if Instagram account is active or banned.
+    Check if Instagram account is active or banned using multiple fallback methods.
     Returns: {'is_active': bool, 'followers': str}
     """
-    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
-        "User-Agent": "Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; Samsung; SM-G998B; qcom; en_US; 454749221)",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
         "X-IG-App-ID": "936619743392459",
         "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
     }
-    
+    if IG_SESSIONID:
+        headers["Cookie"] = f"sessionid={IG_SESSIONID};"
+
+    # Method 1: Web Profile Info API
     try:
-        response = requests.get(url, headers=headers, timeout=8)
-        if response.status_code == 200:
-            data = response.json()
+        url_api = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
+        res = requests.get(url_api, headers=headers, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
             user = data.get("data", {}).get("user")
             if user:
                 count = user.get("edge_followed_by", {}).get("count", 0)
                 return {"is_active": True, "followers": format_followers(count)}
             return {"is_active": True, "followers": "0"}
-        else:
-            # 404, 400, 403 or non-200 -> Banned / Disabled
+        elif res.status_code in [404, 400]:
             return {"is_active": False, "followers": "0"}
     except Exception as e:
-        logging.error(f"Error checking status for {username}: {e}")
-        return {"is_active": False, "followers": "0"}
+        logging.error(f"API check error for {username}: {e}")
+
+    # Method 2: Embed Page HTML Lookup
+    try:
+        url_embed = f"https://www.instagram.com/{username}/embed/"
+        res_embed = requests.get(url_embed, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=6)
+        if res_embed.status_code == 200:
+            html = res_embed.text
+            if "Page Not Found" in html or "unavailable" in html or "isn't available" in html:
+                return {"is_active": False, "followers": "0"}
+            m = re.search(r'([\d\.,KkMm]+)\s+Followers', html)
+            followers = m.group(1) if m else "Active"
+            return {"is_active": True, "followers": followers}
+        elif res_embed.status_code in [404, 400]:
+            return {"is_active": False, "followers": "0"}
+    except Exception as e:
+        logging.error(f"Embed check error for {username}: {e}")
+
+    # Default fallback: Treat as unbanned/active if status cannot be confirmed as 404
+    return {"is_active": True, "followers": "Active"}
 
 
 def format_duration(seconds: float) -> str:
@@ -109,10 +134,6 @@ def handle_monitor(message):
         return
 
     status = check_instagram_status(username)
-    if status["is_active"]:
-        bot.reply_to(message, f"ℹ️ @{username} is already active! Use `/banmonitor` if you want to track bans.")
-        return
-
     bot.reply_to(message, f"🔍 **Monitoring @{username} started!**")
 
     stop_event = threading.Event()
@@ -152,11 +173,6 @@ def handle_banmonitor(message):
 
     if task_key in active_monitors:
         bot.reply_to(message, f"⚠️ Already monitoring @{username}!")
-        return
-
-    status = check_instagram_status(username)
-    if not status["is_active"]:
-        bot.reply_to(message, f"⚠️ @{username} is already banned or does not exist!")
         return
 
     bot.reply_to(message, f"⚡ **Super-fast ban monitoring active for @{username}!**")
@@ -204,11 +220,6 @@ def handle_bulk(message):
         task_key = f"{chat_id}_{username}"
         if task_key in active_monitors:
             skipped.append(f"@{username} (Already monitoring)")
-            continue
-
-        status = check_instagram_status(username)
-        if status["is_active"]:
-            skipped.append(f"@{username} (Already active)")
             continue
 
         stop_event = threading.Event()
