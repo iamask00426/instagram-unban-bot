@@ -5,6 +5,7 @@ import logging
 import sys
 import json
 import re
+import html
 import requests
 from dotenv import load_dotenv
 import telebot
@@ -24,14 +25,15 @@ if not BOT_TOKEN or ":" not in BOT_TOKEN:
     logging.error("❌ ERROR: BOT_TOKEN is missing or invalid in Environment Variables!")
     sys.exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
+# Use HTML parse_mode to prevent markdown underscore stripping!
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # Storage for active monitoring tasks
 active_monitors = {}
 
 
 def format_followers(count) -> str:
-    """Format follower numbers as 710.0k, 101.0k, 3.0m, etc."""
+    """Format follower numbers as 710.0k, 10.2k, 3.0m, etc."""
     try:
         num = float(count)
         if num >= 1_000_000:
@@ -81,10 +83,10 @@ def check_instagram_status(username: str) -> dict:
         url_embed = f"https://www.instagram.com/{username}/embed/"
         res_embed = requests.get(url_embed, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=6)
         if res_embed.status_code == 200:
-            html = res_embed.text
-            if "Page Not Found" in html or "unavailable" in html or "isn't available" in html:
+            html_text = res_embed.text
+            if "Page Not Found" in html_text or "unavailable" in html_text or "isn't available" in html_text:
                 return {"is_active": False, "followers": "0"}
-            m = re.search(r'([\d\.,KkMm]+)\s+Followers', html)
+            m = re.search(r'([\d\.,KkMm]+)\s+Followers', html_text)
             followers = m.group(1) if m else "0"
             return {"is_active": True, "followers": format_followers(followers)}
         elif res_embed.status_code in [404, 400]:
@@ -106,13 +108,13 @@ def format_duration(seconds: float) -> str:
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = (
-        "🤖 **Truzd Instagram Monitor Bot**\n\n"
+        "🤖 <b>Truzd Instagram Monitor Bot</b>\n\n"
         "Commands:\n"
-        "• `/monitor <username>` — Track single IG account for UNBAN.\n"
-        "• `/banmonitor <username>` — Track active IG account for BAN.\n"
-        "• `/bulk <user1> <user2> ...` — Add multiple IG accounts at once.\n"
-        "• `/stop <username>` — Stop monitoring a username.\n"
-        "• `/active` — View all active monitoring tasks."
+        "• <code>/monitor &lt;username&gt;</code> — Track single IG account for UNBAN.\n"
+        "• <code>/banmonitor &lt;username&gt;</code> — Track active IG account for BAN.\n"
+        "• <code>/bulk &lt;user1&gt; &lt;user2&gt; ...</code> — Add multiple IG accounts at once.\n"
+        "• <code>/stop &lt;username&gt;</code> — Stop monitoring a username.\n"
+        "• <code>/active</code> — View all active monitoring tasks."
     )
     bot.reply_to(message, welcome_text)
 
@@ -121,18 +123,19 @@ def send_welcome(message):
 def handle_monitor(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: `/monitor <username>`")
+        bot.reply_to(message, "❌ Usage: <code>/monitor &lt;username&gt;</code>")
         return
 
     username = args[1].replace("@", "").strip()
+    safe_u = html.escape(username)
     chat_id = message.chat.id
     task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
-        bot.reply_to(message, f"⚠️ Already monitoring @{username}!")
+        bot.reply_to(message, f"⚠️ Already monitoring @{safe_u}!")
         return
 
-    bot.reply_to(message, f"🔍 **Monitoring @{username} started!**")
+    bot.reply_to(message, f"🔍 <b>Monitoring @{safe_u} started!</b>")
 
     stop_event = threading.Event()
     start_time = time.time()
@@ -144,13 +147,13 @@ def handle_monitor(message):
             if st["is_active"]:
                 elapsed = format_duration(time.time() - start_time)
                 
-                # Zero-width preview link at top to force Telegram Instagram Profile Card Preview!
+                # HTML parse mode preview link: forces Telegram to display Instagram profile card thumbnail at top!
                 alert_msg = (
-                    f"[⁠](https://www.instagram.com/{username}/)"
-                    f"✅ **Username unbanned!**\n\n"
-                    f"@{username} is now active again — [View Profile](https://instagram.com/{username})\n"
-                    f"Followers: {st['followers']}\n"
-                    f"Time elapsed: {elapsed}"
+                    f'<a href="https://www.instagram.com/{safe_u}/">&#8203;</a>'
+                    f'<b>✅ Username unbanned!</b>\n\n'
+                    f'<a href="https://instagram.com/{safe_u}">@{safe_u}</a> is now active again — <a href="https://instagram.com/{safe_u}">View Profile</a>\n'
+                    f'Followers: {st["followers"]}\n'
+                    f'Time elapsed: {elapsed}'
                 )
                 bot.send_message(chat_id, alert_msg, disable_web_page_preview=False)
                 active_monitors.pop(task_key, None)
@@ -165,18 +168,19 @@ def handle_monitor(message):
 def handle_banmonitor(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: `/banmonitor <username>`")
+        bot.reply_to(message, "❌ Usage: <code>/banmonitor &lt;username&gt;</code>")
         return
 
     username = args[1].replace("@", "").strip()
+    safe_u = html.escape(username)
     chat_id = message.chat.id
     task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
-        bot.reply_to(message, f"⚠️ Already monitoring @{username}!")
+        bot.reply_to(message, f"⚠️ Already monitoring @{safe_u}!")
         return
 
-    bot.reply_to(message, f"⚡ **Super-fast ban monitoring active for @{username}!**")
+    bot.reply_to(message, f"⚡ <b>Super-fast ban monitoring active for @{safe_u}!</b>")
 
     stop_event = threading.Event()
     start_time = time.time()
@@ -188,11 +192,11 @@ def handle_banmonitor(message):
             if not st["is_active"]:
                 elapsed = format_duration(time.time() - start_time)
                 alert_msg = (
-                    f"[⁠](https://www.instagram.com/{username}/)"
-                    f"🚨 **Super-Fast Ban Alert!**\n\n"
-                    f"@{username} has been **BANNED/DISABLED**!\n"
-                    f"Time elapsed: {elapsed}\n\n"
-                    f"🔗 [View Profile](https://instagram.com/{username})"
+                    f'<a href="https://www.instagram.com/{safe_u}/">&#8203;</a>'
+                    f'<b>🚨 Super-Fast Ban Alert!</b>\n\n'
+                    f'<a href="https://instagram.com/{safe_u}">@{safe_u}</a> has been <b>BANNED/DISABLED</b>!\n'
+                    f'Time elapsed: {elapsed}\n\n'
+                    f'🔗 <a href="https://instagram.com/{safe_u}">View Profile</a>'
                 )
                 bot.send_message(chat_id, alert_msg, disable_web_page_preview=False)
                 active_monitors.pop(task_key, None)
@@ -207,7 +211,7 @@ def handle_banmonitor(message):
 def handle_bulk(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: `/bulk user1 user2 user3`")
+        bot.reply_to(message, "❌ Usage: <code>/bulk user1 user2 user3</code>")
         return
 
     raw_input = args[1]
@@ -220,25 +224,26 @@ def handle_bulk(message):
 
     for username in usernames:
         task_key = f"{chat_id}_{username.lower()}"
+        safe_u = html.escape(username)
         if task_key in active_monitors:
-            skipped.append(f"@{username} (Already monitoring)")
+            skipped.append(f"@{safe_u} (Already monitoring)")
             continue
 
         stop_event = threading.Event()
         start_time = time.time()
 
-        def make_worker(u=username, st_time=start_time, key=task_key, ev=stop_event):
+        def make_worker(u=username, safe_name=safe_u, st_time=start_time, key=task_key, ev=stop_event):
             while not ev.is_set():
                 time.sleep(5)
                 st = check_instagram_status(u)
                 if st["is_active"]:
                     elapsed = format_duration(time.time() - st_time)
                     alert_msg = (
-                        f"[⁠](https://www.instagram.com/{u}/)"
-                        f"✅ **Username unbanned!**\n\n"
-                        f"@{u} is now active again — [View Profile](https://instagram.com/{u})\n"
-                        f"Followers: {st['followers']}\n"
-                        f"Time elapsed: {elapsed}"
+                        f'<a href="https://www.instagram.com/{safe_name}/">&#8203;</a>'
+                        f'<b>✅ Username unbanned!</b>\n\n'
+                        f'<a href="https://instagram.com/{safe_name}">@{safe_name}</a> is now active again — <a href="https://instagram.com/{safe_name}">View Profile</a>\n'
+                        f'Followers: {st["followers"]}\n'
+                        f'Time elapsed: {elapsed}'
                     )
                     bot.send_message(chat_id, alert_msg, disable_web_page_preview=False)
                     active_monitors.pop(key, None)
@@ -247,13 +252,13 @@ def handle_bulk(message):
         thread = threading.Thread(target=make_worker, daemon=True)
         thread.start()
         active_monitors[task_key] = {"event": stop_event, "mode": "unban", "start_time": start_time, "username": username}
-        started.append(f"@{username}")
+        started.append(f"@{safe_u}")
 
     msg_parts = []
     if started:
-        msg_parts.append(f"🔍 **Bulk Monitoring Started ({len(started)} accounts):**\n" + ", ".join(started))
+        msg_parts.append(f"🔍 <b>Bulk Monitoring Started ({len(started)} accounts):</b>\n" + ", ".join(started))
     if skipped:
-        msg_parts.append(f"⚠️ **Skipped ({len(skipped)} accounts):**\n" + "\n".join(skipped))
+        msg_parts.append(f"⚠️ <b>Skipped ({len(skipped)} accounts):**\n" + "\n".join(skipped))
 
     bot.reply_to(message, "\n\n".join(msg_parts))
 
@@ -262,19 +267,20 @@ def handle_bulk(message):
 def handle_stop(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        bot.reply_to(message, "❌ Usage: `/stop <username>`")
+        bot.reply_to(message, "❌ Usage: <code>/stop &lt;username&gt;</code>")
         return
 
     username = args[1].replace("@", "").strip()
+    safe_u = html.escape(username)
     chat_id = message.chat.id
     task_key = f"{chat_id}_{username.lower()}"
 
     if task_key in active_monitors:
         active_monitors[task_key]["event"].set()
         active_monitors.pop(task_key, None)
-        bot.reply_to(message, f"🛑 Stopped monitoring @{username}.")
+        bot.reply_to(message, f"🛑 Stopped monitoring @{safe_u}.")
     else:
-        bot.reply_to(message, f"❌ Not currently monitoring @{username}.")
+        bot.reply_to(message, f"❌ Not currently monitoring @{safe_u}.")
 
 
 @bot.message_handler(commands=['active'])
@@ -286,11 +292,12 @@ def handle_active(message):
         bot.reply_to(message, "ℹ️ No active monitoring tasks.")
         return
 
-    lines = ["📊 **Active Monitors:**\n"]
+    lines = ["📊 <b>Active Monitors:</b>\n"]
     for t in user_tasks:
         mode_icon = "✅ Unban" if t["mode"] == "unban" else "🚨 Ban"
         elapsed = format_duration(time.time() - t["start_time"])
-        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {elapsed}")
+        safe_u = html.escape(t['username'])
+        lines.append(f"• @{safe_u} ({mode_icon}) - Running for {elapsed}")
 
     bot.reply_to(message, "\n".join(lines))
 
