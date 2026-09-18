@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import logging
+import sys
 import requests
 from dotenv import load_dotenv
 import telebot
@@ -11,15 +12,17 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing in environment variables!")
-
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+if not BOT_TOKEN or ":" not in BOT_TOKEN:
+    logging.error("❌ ERROR: BOT_TOKEN is missing or invalid in Environment Variables!")
+    logging.error("👉 Please go to Railway Dashboard -> Variables tab -> Add BOT_TOKEN = your_bot_token_from_botfather")
+    sys.exit(1)
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 # Active monitoring jobs
 # Key: f"{chat_id}_{username}", Value: {'event': threading.Event, 'mode': 'unban'|'ban', 'start_time': float, 'username': str}
