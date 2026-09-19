@@ -1,112 +1,85 @@
 import os
 import asyncio
-import aiohttp
+import contextlib
+import ipaddress
 import logging
-import random
-import re
-import itertools
 from datetime import datetime
 from io import BytesIO
+from urllib.parse import urlsplit
+
+import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-load_dotenv()
-
-# --- CONFIGURATION ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8663562942:AAGLFTtUT2V-uH0t3eWHwwcVfxVBEXuqZJg")
-IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
-
-# User Webshare proxies default list
-BUILTIN_PROXIES = [
-    "http://huezajaf:0lsun8mr921c@31.59.20.176:6754",
-    "http://huezajaf:0lsun8mr921c@45.38.107.97:6014",
-    "http://huezajaf:0lsun8mr921c@198.105.121.200:6462",
-    "http://huezajaf:0lsun8mr921c@64.137.96.74:6641",
-    "http://huezajaf:0lsun8mr921c@198.23.243.226:6361",
-    "http://huezajaf:0lsun8mr921c@38.154.185.97:6370",
-    "http://huezajaf:0lsun8mr921c@84.247.60.125:6095",
-    "http://huezajaf:0lsun8mr921c@142.111.67.146:5611",
-    "http://huezajaf:0lsun8mr921c@191.96.254.138:6185",
-    "http://huezajaf:0lsun8mr921c@31.58.9.4:6077",
-    "http://huezajaf-rotate:0lsun8mr921c@p.webshare.io:80/",
-]
-
-def parse_proxy_entry(entry: str) -> str:
-    entry = entry.strip()
-    if not entry:
-        return ""
-    if entry.startswith("http://") or entry.startswith("https://") or entry.startswith("socks5://"):
-        return entry
-    parts = entry.split(":")
-    if len(parts) == 4:
-        # Format: ip:port:user:pass
-        ip, port, user, pwd = parts
-        return f"http://{user}:{pwd}@{ip}:{port}"
-    elif len(parts) == 2:
-        # Format: ip:port
-        return f"http://{parts[0]}:{parts[1]}"
-    return entry
-
-def get_configured_proxies():
-    env_str = os.getenv("PROXIES", "").strip()
-    proxies = []
-    if env_str:
-        for chunk in re.split(r'[,;\n\r]+', env_str):
-            parsed = parse_proxy_entry(chunk)
-            if parsed:
-                proxies.append(parsed)
-    if not proxies:
-        proxies = BUILTIN_PROXIES.copy()
-    return proxies
-
-DEFAULT_PROXIES = get_configured_proxies()
-proxy_pool = itertools.cycle(DEFAULT_PROXIES)
-
-USER_AGENTS = [
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 312.1.0.34.111",
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36 Instagram 313.0.0.35.111",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
+from config import Settings, is_example, normalize_username
+from monitoring import MonitorScheduler, ProfileChecker, profile_session
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
 FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Importing this module neither reads .env nor constructs a network client.
+bot = None
+scheduler = None
 dp = Dispatcher()
 
-# Monitored accounts dictionary
-# Key: username.lower(), Value: dict(username=raw, chat_id=id, start_time=datetime, mode='unban'|'ban')
-monitored_accounts = {}
 
-
-def get_next_proxy():
-    return next(proxy_pool)
-
-
-def format_num(count):
+def safe_avatar_url(value):
     try:
-        num = float(count)
-        if num >= 1_000_000:
-            val = num / 1_000_000
-            return f"{val:.1f}m" if val % 1 != 0 else f"{int(val)}m"
-        elif num >= 1_000:
-            val = num / 1_000
-            return f"{val:.1f}k" if val % 1 != 0 else f"{int(val)}k"
-        return str(int(num))
-    except Exception:
-        return str(count)
+        url = urlsplit(value)
+        return (url.scheme == "https" and url.username is None and url.password is None
+                and url.port in {None, 443} and not url.fragment
+                and any((url.hostname or "").endswith("." + domain)
+                        for domain in ("cdninstagram.com", "fbcdn.net")))
+    except (ValueError, TypeError):
+        return False
+
+
+class PublicAvatarResolver(aiohttp.abc.AbstractResolver):
+    def __init__(self):
+        self.resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=0):
+        addresses = await self.resolver.resolve(host, port, family)
+        if not addresses or any(not ipaddress.ip_address(a["host"]).is_global for a in addresses):
+            raise OSError("Non-public avatar address rejected")
+        return addresses
+
+    async def close(self):
+        await self.resolver.close()
+
+
+async def download_avatar(url):
+    if not safe_avatar_url(url):
+        return None
+    limit = 2 * 1024 * 1024
+    resolver = PublicAvatarResolver()
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=1, resolver=resolver),
+            timeout=aiohttp.ClientTimeout(total=5), cookie_jar=aiohttp.DummyCookieJar(),
+            trust_env=False, auto_decompress=False,
+        ) as session:
+            async with session.get(url, allow_redirects=False, headers={"Accept-Encoding": "identity"}) as response:
+                try:
+                    if (response.status != 200 or response.headers.get("Content-Encoding", "identity") not in {"", "identity"}
+                            or (response.content_length is not None and response.content_length > limit)):
+                        return None
+                    data = bytearray()
+                    while len(data) < limit:
+                        chunk = await response.content.read(min(16384, limit - len(data)))
+                        if not chunk:
+                            return bytes(data)
+                        data.extend(chunk)
+                    return bytes(data) if response.content.at_eof() else None
+                finally:
+                    response.close()
+    finally:
+        await resolver.close()
 
 
 def get_card_fonts():
@@ -120,14 +93,14 @@ def get_card_fonts():
                 "stats_lbl": ImageFont.truetype(FONT_PATH, 30),
                 "name": ImageFont.truetype(FONT_PATH, 32),
             }
-        except Exception as e:
-            logging.error(f"Error loading font.ttf: {e}")
+        except Exception:
+            logging.warning("Unable to load bundled font")
 
     d = ImageFont.load_default()
     return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
 
 
-async def create_profile_card(username, followers, posts, following, pic_url=None, is_banned=False):
+async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False):
     """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
     width, height = 1000, 550
     img = Image.new('RGB', (width, height), color='#000000')
@@ -146,39 +119,39 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
 
     avatar_drawn = False
 
-    # For BANNED account, use default_banned_dp.jpg
-    if is_banned and os.path.exists(DEFAULT_BANNED_DP_PATH):
+    # For an unavailable account, use default_banned_dp.jpg
+    if is_unavailable and os.path.exists(DEFAULT_BANNED_DP_PATH):
         try:
             dp_img = Image.open(DEFAULT_BANNED_DP_PATH).convert("RGB").resize(av_size)
             mask = Image.new('L', av_size, 0)
             ImageDraw.Draw(mask).ellipse((0, 0, av_size[0], av_size[1]), fill=255)
             img.paste(dp_img, (av_center[0]-av_r, av_center[1]-av_r), mask)
             avatar_drawn = True
-        except Exception as e:
-            logging.error(f"Error loading default banned DP: {e}")
+        except Exception:
+            logging.warning("Unable to load default avatar")
 
-    # If unbanned & has pic_url, download avatar
+    # Optional direct avatar traffic; never another profile-details request.
     if not avatar_drawn and pic_url:
         try:
-            timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(pic_url) as resp:
-                    if resp.status == 200:
-                        avatar_bytes = await resp.read()
-                        av_img = Image.open(BytesIO(avatar_bytes)).convert("RGB").resize(av_size)
-                        mask = Image.new('L', av_size, 0)
-                        ImageDraw.Draw(mask).ellipse((0, 0, av_size[0], av_size[1]), fill=255)
-                        img.paste(av_img, (av_center[0]-av_r, av_center[1]-av_r), mask)
-                        avatar_drawn = True
-        except Exception as e:
-            logging.error(f"Avatar download error: {e}")
+            avatar_bytes = await download_avatar(pic_url)
+            if avatar_bytes:
+                with Image.open(BytesIO(avatar_bytes)) as source:
+                    if source.width * source.height > 16_000_000:
+                        raise ValueError("Avatar dimensions exceed limit")
+                    av_img = source.convert("RGB").resize(av_size)
+                mask = Image.new('L', av_size, 0)
+                ImageDraw.Draw(mask).ellipse((0, 0, av_size[0], av_size[1]), fill=255)
+                img.paste(av_img, (av_center[0]-av_r, av_center[1]-av_r), mask)
+                avatar_drawn = True
+        except Exception:
+            logging.warning("Avatar unavailable; using local placeholder")
 
     if not avatar_drawn:
         draw.ellipse([av_center[0]-av_r, av_center[1]-av_r, av_center[0]+av_r, av_center[1]+av_r], fill='#262626')
         first_char = username[0].upper() if username else 'U'
         draw.text((av_center[0]-15, av_center[1]-25), first_char, font=font_username, fill='#ffffff')
 
-    display_username = username if not is_banned else "UserNotFound"
+    display_username = username if not is_unavailable else "UserNotFound"
     uname_x = 320
     uname_y = 200
     draw.text((uname_x, uname_y), display_username, font=font_username, fill='#ffffff')
@@ -222,7 +195,7 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     fgw = draw.textlength(follg_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(follg_str)*20
     draw.text((follg_x + fgw + 10, st_lbl_y), 'following', font=font_stats_lbl, fill='#a8a8a8')
 
-    sub_title = username if not is_banned else "UserNotFound"
+    sub_title = username if not is_unavailable else "UserNotFound"
     draw.text((320, 330), sub_title, font=font_name, fill='#ffffff')
 
     bio = BytesIO()
@@ -231,341 +204,190 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     return bio
 
 
-async def check_single_account(session: aiohttp.ClientSession, username: str) -> dict:
-    """
-    Direct asynchronous check using rotating proxies:
-    Layer 1: If IG_SESSIONID is set, tries Instagram's web_profile_info endpoint.
-    Layer 2: Social crawler OpenGraph extraction (no login needed, zero cost).
-    """
-    proxy = get_next_proxy()
-    
-    # --- Layer 1: web_profile_info (if session cookie available) ---
-    if IG_SESSIONID:
-        api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        api_headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "X-IG-App-ID": "936619743392459",
-            "Cookie": f"sessionid={IG_SESSIONID};",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": f"https://www.instagram.com/{username}/",
-        }
-        try:
-            async with session.get(api_url, headers=api_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    user = data.get("data", {}).get("user")
-                    if user:
-                        followers = user.get("edge_followed_by", {}).get("count", 0)
-                        if followers is not None and followers > 0:
-                            return {
-                                "status": "active",
-                                "username": user.get("username", username),
-                                "followers": format_num(followers),
-                                "posts": format_num(user.get("edge_owner_to_timeline_media", {}).get("count", 0)),
-                                "following": format_num(user.get("edge_follow", {}).get("count", 0)),
-                                "pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                            }
-                    return {"status": "banned"}
-                elif resp.status in [404, 400]:
-                    return {"status": "banned"}
-        except Exception as e:
-            logging.debug(f"API check error for @{username}: {e}")
-
-    # --- Layer 2: Social Crawler OpenGraph Extraction (Zero login requirement) ---
-    crawler_url = f"https://www.instagram.com/{username}/"
-    crawler_headers = {
-        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    try:
-        async with session.get(crawler_url, headers=crawler_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 404:
-                return {"status": "banned"}
-            
-            text = await resp.text()
-            if "Login • Instagram" in text or resp.status in (429, 403):
-                logging.warning(f"Rate limited or login challenge for @{username} on proxy {proxy}")
-                return {"status": "rate_limited"}
-
-            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', text)
-            if desc_match:
-                desc = desc_match.group(1)
-                m = re.search(r'([\d\.,kKmMbB]+)\s+Followers,\s*([\d\.,kKmMbB]+)\s+Following,\s*([\d\.,kKmMbB]+)\s+Posts', desc, re.IGNORECASE)
-                img_match = re.search(r'<meta property="og:image" content="([^"]+)"', text)
-                pic_url = img_match.group(1).replace('&amp;', '&') if img_match else None
-                if m:
-                    return {
-                        "status": "active",
-                        "username": username,
-                        "followers": m.group(1),
-                        "following": m.group(2),
-                        "posts": m.group(3),
-                        "pic_url": pic_url,
-                    }
-
-            if "Page Not Found" in text or 'content="Page Not Found"' in text or "<title>Instagram</title>" in text:
-                return {"status": "banned"}
-
-            return {"status": "unknown"}
-
-    except Exception as e:
-        logging.debug(f"Crawler request error for @{username} on {proxy}: {e}")
-        return {"status": "error"}
-
-
-async def trigger_alert(uname: str, raw_username: str, chat_id: int, mode: str, res: dict, start_time: datetime):
-    """Processes detection result and sends high-res pure black alert card immediately."""
-    t = datetime.now() - start_time
-    h, r = divmod(int(t.total_seconds()), 3600)
-    m, s = divmod(r, 60)
+async def trigger_alert(record, current):
+    """Deliver only cached detection metadata; stale records cannot send a fallback."""
+    if not current():
+        return False
+    result = record.pending
+    elapsed = (record.detected_at or datetime.now()) - record.start_time
+    h, remainder = divmod(int(elapsed.total_seconds()), 3600)
+    m, s = divmod(remainder, 60)
     elapsed_str = f"{h} hours, {m} minutes, {s} seconds"
-
-    # UNBAN ALERT TRIGGER
-    if mode == "unban" and res.get("status") == "active":
+    username = record.username
+    unavailable = result.status == "unavailable"
+    if unavailable:
         msg = (
-            f"Account Recovered | <a href='https://instagram.com/{raw_username}'>@{raw_username}</a> 🏆✅\n"
-            f"<i>Followers: {res['followers']} | Following: {res['following']}</i>\n"
+            f"🚨 <b>Account unavailable</b>\n\n"
+            f"<a href='https://instagram.com/{username}'>@{username}</a> returned repeated HTTP 404 responses.\n"
+            f"<i>This does not prove the account is banned or disabled.</i>\n"
             f"⏱️ <i>Time taken: {elapsed_str}</i>"
         )
-        try:
-            card_img = await create_profile_card(
-                raw_username, res['followers'], res['posts'], res['following'],
-                pic_url=res.get('pic_url'), is_banned=False
-            )
-            await bot.send_photo(
-                chat_id,
-                photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
-                caption=msg
-            )
-        except Exception as e:
-            logging.error(f"Error sending photo alert: {e}")
-            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-
-        if uname in monitored_accounts:
-            del monitored_accounts[uname]
-        return True
-
-    # BAN ALERT TRIGGER
-    elif mode == "ban" and res.get("status") == "banned":
+    else:
         msg = (
-            f"🚨 <b>Super-Fast Ban Alert!</b>\n\n"
-            f"<a href='https://instagram.com/{raw_username}'>@{raw_username}</a> has been <b>BANNED/DISABLED</b>!\n"
-            f"<i>Status: UserNotFound</i>\n"
+            f"Account active/available | <a href='https://instagram.com/{username}'>@{username}</a> 🏆✅\n"
+            f"<i>Followers: {result.followers} | Following: {result.following}</i>\n"
             f"⏱️ <i>Time taken: {elapsed_str}</i>"
         )
-        try:
-            card_img = await create_profile_card(raw_username, 0, 0, 0, is_banned=True)
-            await bot.send_photo(
-                chat_id,
-                photo=types.BufferedInputFile(card_img.read(), filename="card.png"),
-                caption=msg
-            )
-        except Exception as e:
-            logging.error(f"Error sending ban photo alert: {e}")
-            await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
-
-        if uname in monitored_accounts:
-            del monitored_accounts[uname]
-        return True
-
-    return False
-
-
-async def run_instant_check(key: str, raw_username: str, chat_id: int, mode: str, start_time: datetime):
-    """Executes an instant check within 1-2 seconds of user command."""
-    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            res = await check_single_account(session, raw_username)
-            if isinstance(res, dict) and key in monitored_accounts:
-                await trigger_alert(key, raw_username, chat_id, mode, res, start_time)
-    except Exception as e:
-        logging.debug(f"Instant check error for @{raw_username}: {e}")
-
-
-async def monitor_loop():
-    """
-    Continuous ultra-fast background loop checking accounts every 1-2 seconds with rotating proxies.
-    """
-    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
-    while True:
-        try:
-            if monitored_accounts:
-                usernames = list(monitored_accounts.keys())
-                batch_size = 10
-                
-                for i in range(0, len(usernames), batch_size):
-                    batch = usernames[i:i + batch_size]
-                    
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        tasks = [check_single_account(session, u) for u in batch]
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                    for uname, res in zip(batch, results):
-                        if isinstance(res, Exception) or not isinstance(res, dict):
-                            continue
-
-                        if uname not in monitored_accounts:
-                            continue
-
-                        data = monitored_accounts[uname]
-                        await trigger_alert(
-                            uname,
-                            data.get("username", uname),
-                            data["chat_id"],
-                            data.get("mode", "unban"),
-                            res,
-                            data["start_time"]
-                        )
-
-                    # Ultra-fast 1 to 2 second delay between batches
-                    await asyncio.sleep(random.uniform(1.0, 2.0))
-
-            else:
-                await asyncio.sleep(0.5)
-
-        except Exception as e:
-            logging.error(f"Unexpected error in monitor loop: {e}")
-            await asyncio.sleep(1)
+        if not record.photo_prepared:
+            try:
+                image = await create_profile_card(
+                    username, 0 if unavailable else result.followers,
+                    0 if unavailable else result.posts, 0 if unavailable else result.following,
+                    pic_url=None if unavailable else result.pic_url, is_unavailable=unavailable,
+                )
+                if not current():
+                    return False
+                record.photo = image.getvalue()
+            finally:
+                record.photo_prepared = True
+        if not current():
+            return False
+        if record.photo is not None:
+            await bot.send_photo(record.chat_id, photo=types.BufferedInputFile(record.photo, filename="card.png"), caption=msg)
+            return current()
+    except Exception:
+        logging.warning("Photo delivery failed; attempting text fallback")
+    if not current():
+        return False
+    # Telegram must not fetch an Instagram link preview as hidden enrichment.
+    await bot.send_message(record.chat_id, text=msg, disable_web_page_preview=True)
+    return current()
 
 
 @dp.message(Command("start"))
 @dp.message(Command("help"))
 async def start_cmd(message: types.Message):
-    welcome_text = (
-        "🤖 <b>Zero-Cost Instagram Monitor Bot</b>\n\n"
-        "Commands:\n"
-        "• <code>/monitor &lt;username&gt;</code> — Track single IG account for UNBAN.\n"
-        "• <code>/banmonitor &lt;username&gt;</code> — Track active IG account for BAN.\n"
-        "• <code>/bulk user1, user2 ...</code> — Bulk track accounts.\n"
-        "• <code>/stop &lt;username&gt;</code> — Stop tracking.\n"
-        "• <code>/active</code> — View running monitors."
+    await message.answer(
+        "🤖 <b>Instagram Availability Monitor</b>\n\n"
+        "• <code>/monitor &lt;username&gt;</code> — Wait until active/available.\n"
+        "• <code>/banmonitor &lt;username&gt;</code> — Wait for confirmed unavailability (not proof of a ban).\n"
+        "• <code>/bulk user1, user2 ...</code> — Bulk wait-until-active monitoring.\n"
+        "• <code>/stop &lt;username&gt;</code> — Stop your monitor.\n"
+        "• <code>/active</code> — View this chat's monitors."
     )
-    await message.answer(welcome_text)
+
+
+async def add_command(message, mode, command):
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer(f"❌ Usage: <code>/{command} &lt;username&gt;</code>")
+    if not message.from_user:
+        return await message.answer("❌ Monitoring requires an identifiable user.")
+    try:
+        username = normalize_username(args[1])
+    except ValueError:
+        return await message.answer("❌ Invalid Instagram username or profile URL.")
+    record = scheduler.add(username, message.chat.id, message.from_user.id, mode)
+    if record is None:
+        return await message.answer(f"⚠️ Already monitoring <b>@{username}</b>!")
+    label = "availability" if mode == "unban" else "unavailability (not proof of a ban)"
+    await message.answer(f"⚡ Monitoring {label} for <b>@{username}</b>!")
 
 
 @dp.message(Command("monitor"))
 async def add_monitor(message: types.Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("❌ Usage: <code>/monitor &lt;username&gt;</code>")
-    
-    raw = args[1]
-    username = raw.split("instagram.com/")[-1].replace("/", "").replace("@", "").strip()
-    key = username.lower()
-
-    if key in monitored_accounts:
-        return await message.answer(f"⚠️ Already monitoring <b>@{username}</b>!")
-
-    start_time = datetime.now()
-    monitored_accounts[key] = {
-        "username": username,
-        "chat_id": message.chat.id,
-        "start_time": start_time,
-        "mode": "unban"
-    }
-    await message.answer(f"⚡ Super-fast monitoring active for <b>@{username}</b>!")
-    # Instant background check within seconds
-    asyncio.create_task(run_instant_check(key, username, message.chat.id, "unban", start_time))
+    await add_command(message, "unban", "monitor")
 
 
 @dp.message(Command("banmonitor"))
 async def add_banmonitor(message: types.Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("❌ Usage: <code>/banmonitor &lt;username&gt;</code>")
-    
-    raw = args[1]
-    username = raw.split("instagram.com/")[-1].replace("/", "").replace("@", "").strip()
-    key = username.lower()
-
-    if key in monitored_accounts:
-        return await message.answer(f"⚠️ Already monitoring <b>@{username}</b>!")
-
-    start_time = datetime.now()
-    monitored_accounts[key] = {
-        "username": username,
-        "chat_id": message.chat.id,
-        "start_time": start_time,
-        "mode": "ban"
-    }
-    await message.answer(f"🚨 Ban monitoring active for <b>@{username}</b>!")
-    # Instant background check within seconds
-    asyncio.create_task(run_instant_check(key, username, message.chat.id, "ban", start_time))
+    await add_command(message, "ban", "banmonitor")
 
 
 @dp.message(Command("bulk"))
 async def add_bulk(message: types.Message):
-    text = message.text.replace("/bulk", "").strip()
-    if not text:
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
         return await message.answer("❌ Usage: <code>/bulk user1, user2, user3</code>")
-    
-    raw_list = text.replace(",", " ").split()
+    if not message.from_user:
+        return await message.answer("❌ Monitoring requires an identifiable user.")
     added = []
-
-    for u in raw_list:
-        uname = u.split("instagram.com/")[-1].replace("/", "").replace("@", "").strip()
-        key = uname.lower()
-        if uname and key not in monitored_accounts:
-            st = datetime.now()
-            monitored_accounts[key] = {
-                "username": uname,
-                "chat_id": message.chat.id,
-                "start_time": st,
-                "mode": "unban"
-            }
-            added.append(f"@{uname}")
-            # Instant background check
-            asyncio.create_task(run_instant_check(key, uname, message.chat.id, "unban", st))
-
-    if added:
-        await message.answer(f"⚡ <b>{len(added)} accounts added for tracking!</b>\n" + ", ".join(added))
-    else:
-        await message.answer("⚠️ No new accounts were added.")
+    invalid = 0
+    for value in args[1].replace(",", " ").split():
+        try:
+            username = normalize_username(value)
+        except ValueError:
+            invalid += 1
+            continue
+        if scheduler.add(username, message.chat.id, message.from_user.id, "unban"):
+            added.append(f"@{username}")
+    await message.answer(
+        f"⚡ <b>{len(added)} accounts added.</b> Invalid entries skipped: {invalid}.\n" + ", ".join(added)
+        if added or invalid else "⚠️ No new accounts were added."
+    )
 
 
 @dp.message(Command("stop"))
 async def stop_monitor(message: types.Message):
-    args = message.text.split(maxsplit=1)
+    args = (message.text or "").split(maxsplit=1)
     if len(args) < 2:
         return await message.answer("❌ Usage: <code>/stop &lt;username&gt;</code>")
-    
-    raw = args[1]
-    username = raw.split("instagram.com/")[-1].replace("/", "").replace("@", "").strip()
-    key = username.lower()
-
-    if key in monitored_accounts:
-        del monitored_accounts[key]
+    try:
+        username = normalize_username(args[1])
+    except ValueError:
+        return await message.answer("❌ Invalid Instagram username or profile URL.")
+    if message.from_user and scheduler.stop(username, message.chat.id, message.from_user.id):
         await message.answer(f"🛑 Stopped monitoring <b>@{username}</b>.")
     else:
-        await message.answer(f"❌ Not currently monitoring <b>@{username}</b>.")
+        await message.answer(f"❌ No monitor owned by you in this chat for <b>@{username}</b>.")
 
 
 @dp.message(Command("active"))
 async def show_active(message: types.Message):
-    user_tasks = [v for k, v in monitored_accounts.items() if v["chat_id"] == message.chat.id]
-    if not user_tasks:
+    records = [r for r in scheduler.records.values() if r.chat_id == message.chat.id]
+    if not records:
         return await message.answer("ℹ️ No active monitoring tasks.")
-
     lines = ["📊 <b>Active Monitors:</b>\n"]
-    for t in user_tasks:
-        mode_icon = "✅ Unban" if t["mode"] == "unban" else "🚨 Ban"
-        elapsed = datetime.now() - t["start_time"]
-        h, r = divmod(int(elapsed.total_seconds()), 3600)
-        m, s = divmod(r, 60)
-        lines.append(f"• @{t['username']} ({mode_icon}) - Running for {h}h {m}m {s}s")
-
+    for record in records:
+        mode = "✅ Availability" if record.mode == "unban" else "🚨 Unavailability"
+        if record.pending:
+            mode += " — alert delivery pending"
+        elapsed = datetime.now() - record.start_time
+        h, remainder = divmod(int(elapsed.total_seconds()), 3600)
+        m, s = divmod(remainder, 60)
+        lines.append(f"• @{record.username} ({mode}) - Running for {h}h {m}m {s}s")
     await message.answer("\n".join(lines))
 
 
 async def main():
-    print("🚀 Zero-Cost Instagram Monitor Bot is starting...")
-    asyncio.create_task(monitor_loop())
-    await dp.start_polling(bot)
+    global bot, scheduler
+    # Only executable startup loads local secrets, never imports or tests.
+    load_dotenv()
+    try:
+        settings = Settings.from_env(os.environ)
+    except ValueError as error:
+        # Only our value-free configuration validation messages may be printed.
+        raise SystemExit(f"Startup configuration error: {error}") from None
+    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+    if os.getenv("IG_SESSIONID") and is_example(os.environ["IG_SESSIONID"]):
+        logging.warning("Example IG_SESSIONID ignored; HTML checks do not require a session cookie")
+    # Avoid framework exception/HTTP request logs containing tokens or proxy URLs.
+    logging.getLogger("aiogram").setLevel(logging.CRITICAL)
+    logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
+    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    try:
+        async with profile_session(settings) as session:
+            checker = ProfileChecker(session, settings)
+            scheduler = MonitorScheduler(settings, checker.check, trigger_alert)
+            monitor_task = asyncio.create_task(scheduler.run())
+            try:
+                await dp.start_polling(bot)
+            finally:
+                monitor_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await monitor_task
+                logging.info("Profile checks: attempts=%s outcomes=%s consumed_body_bytes=%s encoded_body_bytes=%s (not billed bytes)",
+                             checker.metrics.request_attempts, dict(checker.metrics.outcomes),
+                             checker.metrics.consumed_body_bytes, checker.metrics.encoded_body_bytes)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        raise SystemExit("Bot stopped unexpectedly; check configuration and service availability (details redacted).") from None
