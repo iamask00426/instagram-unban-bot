@@ -2,9 +2,11 @@ import os
 import asyncio
 import aiohttp
 import logging
-import random
 import re
 import itertools
+import time
+from contextlib import suppress
+from monitoring import InstagramChecker, check_due_accounts
 from datetime import datetime
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
@@ -18,23 +20,14 @@ from aiogram.client.default import DefaultBotProperties
 load_dotenv()
 
 # --- CONFIGURATION ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8663562942:AAGLFTtUT2V-uH0t3eWHwwcVfxVBEXuqZJg")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 IG_SESSIONID = os.getenv("IG_SESSIONID", "").strip()
 
-# User Webshare proxies default list
-BUILTIN_PROXIES = [
-    "http://huezajaf:0lsun8mr921c@31.59.20.176:6754",
-    "http://huezajaf:0lsun8mr921c@45.38.107.97:6014",
-    "http://huezajaf:0lsun8mr921c@198.105.121.200:6462",
-    "http://huezajaf:0lsun8mr921c@64.137.96.74:6641",
-    "http://huezajaf:0lsun8mr921c@198.23.243.226:6361",
-    "http://huezajaf:0lsun8mr921c@38.154.185.97:6370",
-    "http://huezajaf:0lsun8mr921c@84.247.60.125:6095",
-    "http://huezajaf:0lsun8mr921c@142.111.67.146:5611",
-    "http://huezajaf:0lsun8mr921c@191.96.254.138:6185",
-    "http://huezajaf:0lsun8mr921c@31.58.9.4:6077",
-    "http://huezajaf-rotate:0lsun8mr921c@p.webshare.io:80/",
-]
+# Low-bandwidth defaults. Checks use one request, with no HTML fallback.
+CHECK_INTERVAL_SECONDS = max(10, int(os.getenv("CHECK_INTERVAL_SECONDS", "60")))
+MAX_BACKOFF_SECONDS = max(CHECK_INTERVAL_SECONDS, int(os.getenv("MAX_BACKOFF_SECONDS", "3600")))
+MAX_CONCURRENT_CHECKS = max(1, int(os.getenv("MAX_CONCURRENT_CHECKS", "3")))
+MAX_RESPONSE_BYTES = max(4096, int(os.getenv("MAX_RESPONSE_BYTES", "131072")))
 
 def parse_proxy_entry(entry: str) -> str:
     entry = entry.strip()
@@ -60,19 +53,10 @@ def get_configured_proxies():
             parsed = parse_proxy_entry(chunk)
             if parsed:
                 proxies.append(parsed)
-    if not proxies:
-        proxies = BUILTIN_PROXIES.copy()
     return proxies
 
 DEFAULT_PROXIES = get_configured_proxies()
 proxy_pool = itertools.cycle(DEFAULT_PROXIES)
-
-USER_AGENTS = [
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 312.1.0.34.111",
-    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36 Instagram 313.0.0.35.111",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
@@ -93,20 +77,6 @@ monitored_accounts = {}
 
 def get_next_proxy():
     return next(proxy_pool)
-
-
-def format_num(count):
-    try:
-        num = float(count)
-        if num >= 1_000_000:
-            val = num / 1_000_000
-            return f"{val:.1f}m" if val % 1 != 0 else f"{int(val)}m"
-        elif num >= 1_000:
-            val = num / 1_000
-            return f"{val:.1f}k" if val % 1 != 0 else f"{int(val)}k"
-        return str(int(num))
-    except Exception:
-        return str(count)
 
 
 def get_card_fonts():
@@ -231,93 +201,9 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     return bio
 
 
-async def check_single_account(session: aiohttp.ClientSession, username: str) -> dict:
-    """
-    Direct asynchronous check using rotating proxies:
-    Layer 1: If IG_SESSIONID is set, tries Instagram's web_profile_info endpoint.
-    Layer 2: Social crawler OpenGraph extraction (no login needed, zero cost).
-    """
-    proxy = get_next_proxy()
-    
-    # --- Layer 1: web_profile_info (if session cookie available) ---
-    if IG_SESSIONID:
-        api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        api_headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "X-IG-App-ID": "936619743392459",
-            "Cookie": f"sessionid={IG_SESSIONID};",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": f"https://www.instagram.com/{username}/",
-        }
-        try:
-            async with session.get(api_url, headers=api_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    user = data.get("data", {}).get("user")
-                    if user:
-                        followers = user.get("edge_followed_by", {}).get("count", 0)
-                        if followers is not None and followers > 0:
-                            return {
-                                "status": "active",
-                                "username": user.get("username", username),
-                                "followers": format_num(followers),
-                                "posts": format_num(user.get("edge_owner_to_timeline_media", {}).get("count", 0)),
-                                "following": format_num(user.get("edge_follow", {}).get("count", 0)),
-                                "pic_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                            }
-                    return {"status": "banned"}
-                elif resp.status in [404, 400]:
-                    return {"status": "banned"}
-        except Exception as e:
-            logging.debug(f"API check error for @{username}: {e}")
-
-    # --- Layer 2: Social Crawler OpenGraph Extraction (Zero login requirement) ---
-    crawler_url = f"https://www.instagram.com/{username}/"
-    crawler_headers = {
-        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    try:
-        async with session.get(crawler_url, headers=crawler_headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 404:
-                return {"status": "banned"}
-            
-            text = await resp.text()
-            if "Login • Instagram" in text or resp.status in (429, 403):
-                logging.warning(f"Rate limited or login challenge for @{username} on proxy {proxy}")
-                return {"status": "rate_limited"}
-
-            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', text)
-            if desc_match:
-                desc = desc_match.group(1)
-                m = re.search(r'([\d\.,kKmMbB]+)\s+Followers,\s*([\d\.,kKmMbB]+)\s+Following,\s*([\d\.,kKmMbB]+)\s+Posts', desc, re.IGNORECASE)
-                img_match = re.search(r'<meta property="og:image" content="([^"]+)"', text)
-                pic_url = img_match.group(1).replace('&amp;', '&') if img_match else None
-                if m:
-                    return {
-                        "status": "active",
-                        "username": username,
-                        "followers": m.group(1),
-                        "following": m.group(2),
-                        "posts": m.group(3),
-                        "pic_url": pic_url,
-                    }
-
-            if "Page Not Found" in text or 'content="Page Not Found"' in text or "<title>Instagram</title>" in text:
-                return {"status": "banned"}
-
-            return {"status": "unknown"}
-
-    except Exception as e:
-        logging.debug(f"Crawler request error for @{username} on {proxy}: {e}")
-        return {"status": "error"}
-
-
 async def trigger_alert(uname: str, raw_username: str, chat_id: int, mode: str, res: dict, start_time: datetime):
     """Processes detection result and sends high-res pure black alert card immediately."""
+    record = monitored_accounts.get(uname)
     t = datetime.now() - start_time
     h, r = divmod(int(t.total_seconds()), 3600)
     m, s = divmod(r, 60)
@@ -344,8 +230,8 @@ async def trigger_alert(uname: str, raw_username: str, chat_id: int, mode: str, 
             logging.error(f"Error sending photo alert: {e}")
             await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
 
-        if uname in monitored_accounts:
-            del monitored_accounts[uname]
+        if monitored_accounts.get(uname) is record:
+            monitored_accounts.pop(uname, None)
         return True
 
     # BAN ALERT TRIGGER
@@ -367,76 +253,44 @@ async def trigger_alert(uname: str, raw_username: str, chat_id: int, mode: str, 
             logging.error(f"Error sending ban photo alert: {e}")
             await bot.send_message(chat_id, text=msg, disable_web_page_preview=False)
 
-        if uname in monitored_accounts:
-            del monitored_accounts[uname]
+        if monitored_accounts.get(uname) is record:
+            monitored_accounts.pop(uname, None)
         return True
 
     return False
 
 
-async def run_instant_check(key: str, raw_username: str, chat_id: int, mode: str, start_time: datetime):
-    """Executes an instant check within 1-2 seconds of user command."""
-    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            res = await check_single_account(session, raw_username)
-            if isinstance(res, dict) and key in monitored_accounts:
-                await trigger_alert(key, raw_username, chat_id, mode, res, start_time)
-    except Exception as e:
-        logging.debug(f"Instant check error for @{raw_username}: {e}")
-
-
 async def monitor_loop():
-    """
-    Continuous ultra-fast background loop checking accounts every 1-2 seconds with rotating proxies.
-    """
-    timeout = aiohttp.ClientTimeout(total=4, sock_connect=2)
-    while True:
-        try:
-            if monitored_accounts:
-                usernames = list(monitored_accounts.keys())
-                batch_size = 10
-                
-                for i in range(0, len(usernames), batch_size):
-                    batch = usernames[i:i + batch_size]
-                    
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        tasks = [check_single_account(session, u) for u in batch]
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
+    checker = InstagramChecker(get_next_proxy, IG_SESSIONID, MAX_RESPONSE_BYTES, MAX_BACKOFF_SECONDS)
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_CHECKS)
 
-                    for uname, res in zip(batch, results):
-                        if isinstance(res, Exception) or not isinstance(res, dict):
-                            continue
+    async def on_result(uname, data, result):
+        await trigger_alert(uname, data["username"], data["chat_id"], data["mode"],
+                            result, data["start_time"])
 
-                        if uname not in monitored_accounts:
-                            continue
-
-                        data = monitored_accounts[uname]
-                        await trigger_alert(
-                            uname,
-                            data.get("username", uname),
-                            data["chat_id"],
-                            data.get("mode", "unban"),
-                            res,
-                            data["start_time"]
-                        )
-
-                    # Ultra-fast 1 to 2 second delay between batches
-                    await asyncio.sleep(random.uniform(1.0, 2.0))
-
-            else:
-                await asyncio.sleep(0.5)
-
-        except Exception as e:
-            logging.error(f"Unexpected error in monitor loop: {e}")
-            await asyncio.sleep(1)
+    last_log = time.monotonic()
+    # Reuse connections; do not accumulate cookies across usernames/proxies.
+    async with aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
+                                     read_bufsize=8192, trust_env=False) as session:
+        while True:
+            await check_due_accounts(monitored_accounts, session, checker, on_result,
+                                     CHECK_INTERVAL_SECONDS, MAX_BACKOFF_SECONDS,
+                                     MAX_CONCURRENT_CHECKS)
+            if time.monotonic() - last_log >= 60:
+                logging.info("Proxy checks since startup: requests=%d consumed_body_bytes=%d "
+                             "capped_responses=%d accounts=%d cooldown_seconds=%.0f",
+                             checker.requests, checker.body_bytes, checker.capped_responses,
+                             len(monitored_accounts), max(0, checker.cooldown_until - time.monotonic()))
+                last_log = time.monotonic()
+            await asyncio.sleep(0.5)
 
 
 @dp.message(Command("start"))
 @dp.message(Command("help"))
 async def start_cmd(message: types.Message):
     welcome_text = (
-        "🤖 <b>Zero-Cost Instagram Monitor Bot</b>\n\n"
+        "🤖 <b>Low-Bandwidth Instagram Monitor Bot</b>\n\n"
+        f"Check interval: {CHECK_INTERVAL_SECONDS}s (+ jitter); errors back off.\n\n"
         "Commands:\n"
         "• <code>/monitor &lt;username&gt;</code> — Track single IG account for UNBAN.\n"
         "• <code>/banmonitor &lt;username&gt;</code> — Track active IG account for BAN.\n"
@@ -467,9 +321,7 @@ async def add_monitor(message: types.Message):
         "start_time": start_time,
         "mode": "unban"
     }
-    await message.answer(f"⚡ Super-fast monitoring active for <b>@{username}</b>!")
-    # Instant background check within seconds
-    asyncio.create_task(run_instant_check(key, username, message.chat.id, "unban", start_time))
+    await message.answer(f"✅ Monitoring <b>@{username}</b> every ~{CHECK_INTERVAL_SECONDS}s.")
 
 
 @dp.message(Command("banmonitor"))
@@ -492,9 +344,7 @@ async def add_banmonitor(message: types.Message):
         "start_time": start_time,
         "mode": "ban"
     }
-    await message.answer(f"🚨 Ban monitoring active for <b>@{username}</b>!")
-    # Instant background check within seconds
-    asyncio.create_task(run_instant_check(key, username, message.chat.id, "ban", start_time))
+    await message.answer(f"🚨 Ban monitoring <b>@{username}</b> every ~{CHECK_INTERVAL_SECONDS}s.")
 
 
 @dp.message(Command("bulk"))
@@ -518,8 +368,6 @@ async def add_bulk(message: types.Message):
                 "mode": "unban"
             }
             added.append(f"@{uname}")
-            # Instant background check
-            asyncio.create_task(run_instant_check(key, uname, message.chat.id, "unban", st))
 
     if added:
         await message.answer(f"⚡ <b>{len(added)} accounts added for tracking!</b>\n" + ", ".join(added))
@@ -562,9 +410,16 @@ async def show_active(message: types.Message):
 
 
 async def main():
-    print("🚀 Zero-Cost Instagram Monitor Bot is starting...")
-    asyncio.create_task(monitor_loop())
-    await dp.start_polling(bot)
+    if not DEFAULT_PROXIES:
+        raise RuntimeError("Set PROXIES in .env before starting; no built-in credentials are used.")
+    print(f"🚀 Low-bandwidth monitor starting (interval: {CHECK_INTERVAL_SECONDS}s)...")
+    monitor_task = asyncio.create_task(monitor_loop())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
 
 
 if __name__ == "__main__":
