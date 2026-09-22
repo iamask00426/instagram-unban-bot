@@ -162,7 +162,7 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result):
 
         content = (
             f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-            f"*Followers {result.followers}   Following {result.following}*\n"
+            f"Followers: {result.followers} | Following: {result.following}\n"
             f"⏱️ *Time taken: {elapsed_str}*"
         )
 
@@ -175,11 +175,12 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result):
             if origin_ch and origin_ch not in target_channels:
                 target_channels.append(origin_ch)
 
+        full_name = getattr(result, "full_name", "") or raw_user
         card_io = None
         try:
             card_io = await create_profile_card(
                 raw_user, result.followers, result.posts, result.following,
-                pic_url=result.pic_url, is_unavailable=False
+                pic_url=result.pic_url, is_unavailable=False, full_name=full_name
             )
         except Exception as e:
             logging.error(f"Error creating Discord card for @{raw_user}: {e}")
@@ -190,7 +191,9 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result):
                 if card_io:
                     card_io.seek(0)
                     file = discord.File(card_io, filename="card.png")
-                    await ch.send(content=content, file=file)
+                    embed = discord.Embed(color=0x2b2d31)
+                    embed.set_image(url="attachment://card.png")
+                    await ch.send(content=content, embed=embed, file=file)
                 else:
                     await ch.send(content=content)
                 sent = True
@@ -243,7 +246,7 @@ async def send_ban_alert(guild: discord.Guild, monitor_data: dict):
         card_io = None
         try:
             card_io = await create_profile_card(
-                raw_user, 0, 0, 0, pic_url=None, is_unavailable=True
+                raw_user, 0, 0, 0, pic_url=None, is_unavailable=True, full_name="UserNotFound"
             )
         except Exception as e:
             logging.error(f"Error creating ban card for @{raw_user}: {e}")
@@ -254,7 +257,9 @@ async def send_ban_alert(guild: discord.Guild, monitor_data: dict):
                 if card_io:
                     card_io.seek(0)
                     file = discord.File(card_io, filename="card.png")
-                    await ch.send(content=content, file=file)
+                    embed = discord.Embed(color=0x2b2d31)
+                    embed.set_image(url="attachment://card.png")
+                    await ch.send(content=content, embed=embed, file=file)
                 else:
                     await ch.send(content=content)
                 sent = True

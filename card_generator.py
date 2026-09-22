@@ -46,7 +46,11 @@ async def download_avatar(url):
             timeout=aiohttp.ClientTimeout(total=5), cookie_jar=aiohttp.DummyCookieJar(),
             trust_env=False, auto_decompress=False,
         ) as session:
-            async with session.get(url, allow_redirects=False, headers={"Accept-Encoding": "identity"}) as response:
+            headers = {
+                "Accept-Encoding": "identity",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            async with session.get(url, allow_redirects=True, headers=headers) as response:
                 try:
                     if (response.status != 200 or response.headers.get("Content-Encoding", "identity") not in {"", "identity"}
                             or (response.content_length is not None and response.content_length > limit)):
@@ -82,7 +86,7 @@ def get_card_fonts():
     d = ImageFont.load_default()
     return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
 
-async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False):
+async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None):
     """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
     width, height = 1000, 550
     img = Image.new('RGB', (width, height), color='#000000')
@@ -175,7 +179,7 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     fgw = draw.textlength(follg_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(follg_str)*20
     draw.text((follg_x + fgw + 10, st_lbl_y), 'following', font=font_stats_lbl, fill='#a8a8a8')
 
-    sub_title = username if not is_unavailable else "UserNotFound"
+    sub_title = (full_name if full_name else username) if not is_unavailable else "UserNotFound"
     draw.text((320, 330), sub_title, font=font_name, fill='#ffffff')
 
     bio = BytesIO()

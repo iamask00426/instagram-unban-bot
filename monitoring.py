@@ -34,6 +34,7 @@ class CheckResult:
     posts: str = "?"
     pic_url: str | None = None
     retry_after: float = 0
+    full_name: str = ""
 
 
 @dataclass
@@ -134,8 +135,13 @@ class ProfileHTMLParser(HTMLParser):
         counts = COUNTS.match(self.metadata.get("og:description", ""))
         if not counts:
             return None
+        full_name = ""
+        if title_user:
+            full_name = title[:title_user.start()].strip()
+        if not full_name:
+            full_name = self.username
         return CheckResult("active", self.username, counts[1], counts[2], counts[3],
-                           self.metadata.get("og:image") or None)
+                           self.metadata.get("og:image") or None, 0, full_name)
 
 
 class BoundedBody:
@@ -197,7 +203,8 @@ def json_profile(data, username):
             return None
         counts.append(format_num(count))
     pic = user.get("profile_pic_url_hd") or user.get("profile_pic_url")
-    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None)
+    full_name = user.get("full_name") or username
+    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name)
 
 
 async def read_profile(response, username, settings, metrics):
