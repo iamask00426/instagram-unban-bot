@@ -119,3 +119,54 @@ class Settings:
             unavailable_confirmations=_number(env, "UNAVAILABLE_CONFIRMATIONS", 2, 2, 10, True),
             confirmation_interval=_number(env, "CONFIRMATION_INTERVAL_SECONDS", 5, 1, 3600),
         )
+
+def parse_usernames(text: str) -> list[str]:
+    """
+    Extract ONLY valid Instagram usernames from multiline text, URLs, or handles.
+    """
+    raw_tokens = re.split(r'[\r\n,\s]+', text)
+    usernames = []
+    seen = set()
+
+    for token in raw_tokens:
+        token = token.strip()
+        if not token:
+            continue
+
+        # If it's an explicit URL
+        if token.startswith(('http://', 'https://')):
+            try:
+                parsed = urlsplit(token)
+                if parsed.hostname not in {'instagram.com', 'www.instagram.com'}:
+                    continue
+                path = parsed.path.strip('/')
+                parts = [p for p in path.split('/') if p]
+                if parts:
+                    token = parts[0]
+                else:
+                    continue
+            except Exception:
+                continue
+        elif 'instagram.com/' in token:
+            try:
+                parsed = urlsplit('https://' + token)
+                path = parsed.path.strip('/')
+                parts = [p for p in path.split('/') if p]
+                if parts:
+                    token = parts[0]
+                else:
+                    continue
+            except Exception:
+                continue
+
+        token = token.split('?')[0].split('&')[0].strip('/')
+        if token.startswith('@'):
+            token = token[1:]
+
+        token = token.lower()
+        if re.fullmatch(r'[a-zA-Z0-9_.]{1,30}', token):
+            if token not in seen:
+                seen.add(token)
+                usernames.append(token)
+
+    return usernames
