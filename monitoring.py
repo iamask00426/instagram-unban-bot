@@ -35,6 +35,7 @@ class CheckResult:
     pic_url: str | None = None
     retry_after: float = 0
     full_name: str = ""
+    is_verified: bool = False
 
 
 @dataclass
@@ -70,6 +71,7 @@ class ProfileHTMLParser(HTMLParser):
         self.invalid = False
         self.in_title = False
         self.title = ""
+        self.is_verified = False
 
     def handle_starttag(self, tag, attrs):
         if self.boundary:
@@ -141,7 +143,7 @@ class ProfileHTMLParser(HTMLParser):
         if not full_name:
             full_name = self.username
         return CheckResult("active", self.username, counts[1], counts[2], counts[3],
-                           self.metadata.get("og:image") or None, 0, full_name)
+                           self.metadata.get("og:image") or None, 0, full_name, self.is_verified)
 
 
 class BoundedBody:
@@ -204,7 +206,8 @@ def json_profile(data, username):
         counts.append(format_num(count))
     pic = user.get("profile_pic_url_hd") or user.get("profile_pic_url")
     full_name = user.get("full_name") or username
-    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name)
+    is_verified = bool(user.get("is_verified", False))
+    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name, is_verified)
 
 
 async def read_profile(response, username, settings, metrics):
@@ -215,6 +218,8 @@ async def read_profile(response, username, settings, metrics):
         body = BoundedBody(response, settings.body_limit, metrics)
         async for chunk in body:
             decoded = decoder.decode(chunk)
+            if '"is_verified":true' in decoded or '"is_verified": true' in decoded:
+                parser.is_verified = True
             if settings.mode == "html":
                 parser.feed(decoded)
                 result = parser.result()

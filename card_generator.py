@@ -86,7 +86,7 @@ def get_card_fonts():
     d = ImageFont.load_default()
     return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
 
-async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None):
+async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None, is_verified=False, style=1):
     """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
     width, height = 1000, 550
     img = Image.new('RGB', (width, height), color='#000000')
@@ -98,6 +98,11 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     font_stats_num = fonts["stats_num"]
     font_stats_lbl = fonts["stats_lbl"]
     font_name = fonts["name"]
+
+    # Optional banner for Style 4 ("Back from the grave")
+    if style == 4 and not is_unavailable:
+        draw.rounded_rectangle([320, 135, 710, 180], radius=8, fill='#2a0845')
+        draw.text((335, 142), "⚰️ BACK FROM THE GRAVE 🧟‍♂️", font=font_btn, fill='#e084f7')
 
     av_center = (180, 275)
     av_r = 100
@@ -145,7 +150,16 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     except Exception:
         uname_w = len(display_username) * 28
 
-    btn_left = int(uname_x + uname_w + 25)
+    badge_offset = 0
+    if is_verified:
+        badge_cx = int(uname_x + uname_w + 22)
+        badge_cy = uname_y + 25
+        draw.ellipse([badge_cx-12, badge_cy-12, badge_cx+12, badge_cy+12], fill='#0095f6')
+        points = [(badge_cx - 5, badge_cy), (badge_cx - 1, badge_cy + 4), (badge_cx + 6, badge_cy - 4)]
+        draw.line(points, fill='#ffffff', width=3, joint='curve')
+        badge_offset = 32
+
+    btn_left = int(uname_x + uname_w + 25 + badge_offset)
     btn_top = 205
     btn_w = 130
     btn_h = 50

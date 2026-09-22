@@ -76,10 +76,62 @@ class TestDiscordBot(unittest.TestCase):
     def test_channel_routing_settings(self):
         database.set_channel(999, "unban", 12345)
         database.set_channel(999, "ban", 67890)
+        database.set_channel(999, "tick", 11223)
 
         settings = database.get_channels(999)
         self.assertEqual(settings["unban_channel_id"], 12345)
         self.assertEqual(settings["ban_channel_id"], 67890)
+        self.assertEqual(settings["tick_channel_id"], 11223)
+
+    def test_clear_all_monitors(self):
+        database.add_monitors(["user1", "user2"], "unban", 555, 1, 1)
+        database.add_monitors(["user3"], "ban", 555, 1, 1)
+        database.add_monitors(["other"], "unban", 666, 1, 1)
+
+        cleared = database.clear_all_monitors(555)
+        self.assertEqual(cleared, 3)
+
+        # Other guild monitors remain intact
+        rem = database.get_all_monitors()
+        self.assertEqual(len(rem), 1)
+        self.assertEqual(rem[0]["guild_id"], 666)
+
+    def test_unban_history_and_stats_reset(self):
+        database.record_unban_stat(777, "user_one", "User_One")
+        database.record_unban_stat(777, "user_two", "User_Two")
+        database.record_unban_stat(888, "user_three", "User_Three")
+
+        stats_2h = database.get_unban_stats(777, 7200)
+        self.assertEqual(len(stats_2h), 2)
+
+        stats_other = database.get_unban_stats(888, 7200)
+        self.assertEqual(len(stats_other), 1)
+
+        # Reset 777 window
+        reset_cnt = database.reset_unban_stats(777, 7200)
+        self.assertEqual(reset_cnt, 2)
+        self.assertEqual(len(database.get_unban_stats(777, 7200)), 0)
+        self.assertEqual(len(database.get_unban_stats(888, 7200)), 1)
+
+    def test_server_settings_style_and_autoban(self):
+        database.set_server_setting(444, "style", 4)
+        database.set_server_setting(444, "autoban", 1)
+        database.set_server_setting(444, "tg_bot_token", "123:ABC")
+        database.set_server_setting(444, "tg_chat_id", "999888")
+
+        st = database.get_server_settings(444)
+        self.assertEqual(st["style"], 4)
+        self.assertEqual(st["autoban"], 1)
+        self.assertEqual(st["tg_bot_token"], "123:ABC")
+        self.assertEqual(st["tg_chat_id"], "999888")
+
+    def test_tick_mode_persistence(self):
+        added = database.add_monitors(["tick_user"], "tick", 333, 10, 1)
+        self.assertEqual(added, ["tick_user"])
+        records = database.get_all_monitors()
+        match = next((r for r in records if r["username"] == "tick_user"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["mode"], "tick")
 
 if __name__ == "__main__":
     unittest.main()

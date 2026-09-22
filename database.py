@@ -14,13 +14,13 @@ def init_db():
         cursor = conn.cursor()
         cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'")
         row = cursor.fetchone()
-        if row and "PRIMARY KEY (username, guild_id)" not in row[0]:
+        if row and ("'tick'" not in row[0] or "PRIMARY KEY (username, guild_id)" not in row[0]):
             cursor.execute("ALTER TABLE monitors RENAME TO monitors_old")
             cursor.execute("""
                 CREATE TABLE monitors (
                     username TEXT NOT NULL,
                     raw_username TEXT NOT NULL,
-                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban')),
+                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban', 'tick')),
                     guild_id INTEGER NOT NULL,
                     channel_id INTEGER NOT NULL,
                     added_by INTEGER NOT NULL,
@@ -38,7 +38,7 @@ def init_db():
                 CREATE TABLE monitors (
                     username TEXT NOT NULL,
                     raw_username TEXT NOT NULL,
-                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban')),
+                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban', 'tick')),
                     guild_id INTEGER NOT NULL,
                     channel_id INTEGER NOT NULL,
                     added_by INTEGER NOT NULL,
@@ -48,10 +48,25 @@ def init_db():
             """)
 
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_settings (
+            CREATE TABLE IF NOT EXISTS server_settings (
                 guild_id INTEGER PRIMARY KEY,
                 unban_channel_id INTEGER,
-                ban_channel_id INTEGER
+                ban_channel_id INTEGER,
+                tick_channel_id INTEGER,
+                style INTEGER DEFAULT 1,
+                autoban INTEGER DEFAULT 0,
+                tg_bot_token TEXT,
+                tg_chat_id TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS unban_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                raw_username TEXT NOT NULL,
+                unbanned_at TIMESTAMP NOT NULL
             )
         """)
         conn.commit()
@@ -124,23 +139,86 @@ def get_all_monitors() -> list[dict]:
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
-def set_channel(guild_id: int, channel_type: str, channel_id: int):
-    col = "unban_channel_id" if channel_type == "unban" else "ban_channel_id"
+def clear_all_monitors(guild_id: int) -> int:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM monitors WHERE guild_id = ?", (guild_id,))
+        count = cursor.rowcount
+        conn.commit()
+        return count
+
+def record_unban_stat(guild_id: int, username: str, raw_username: str):
+    now = datetime.now()
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO channel_settings (guild_id, unban_channel_id, ban_channel_id)
-            VALUES (?, NULL, NULL)
-            ON CONFLICT(guild_id) DO NOTHING
-        """, (guild_id,))
-        cursor.execute(f"UPDATE channel_settings SET {col} = ? WHERE guild_id = ?", (channel_id, guild_id))
+            INSERT INTO unban_history (guild_id, username, raw_username, unbanned_at)
+            VALUES (?, ?, ?, ?)
+        """, (guild_id, username.lower(), raw_username, now))
         conn.commit()
 
-def get_channels(guild_id: int) -> dict:
+def get_unban_stats(guild_id: int, window_seconds: int) -> list[dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT unban_channel_id, ban_channel_id FROM channel_settings WHERE guild_id = ?", (guild_id,))
+        cursor.execute("""
+            SELECT * FROM unban_history
+            WHERE guild_id = ? AND (strftime('%s', 'now') - strftime('%s', unbanned_at)) <= ?
+            ORDER BY unbanned_at DESC
+        """, (guild_id, window_seconds))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def reset_unban_stats(guild_id: int, window_seconds: int) -> int:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            DELETE FROM unban_history
+            WHERE guild_id = ? AND (strftime('%s', 'now') - strftime('%s', unbanned_at)) <= ?
+        """, (guild_id, window_seconds))
+        count = cursor.rowcount
+        conn.commit()
+        return count
+
+def set_server_setting(guild_id: int, key: str, value):
+    valid_cols = {"unban_channel_id", "ban_channel_id", "tick_channel_id", "style", "autoban", "tg_bot_token", "tg_chat_id"}
+    if key not in valid_cols:
+        raise ValueError(f"Invalid server setting key: {key}")
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO server_settings (guild_id)
+            VALUES (?)
+            ON CONFLICT(guild_id) DO NOTHING
+        """, (guild_id,))
+        cursor.execute(f"UPDATE server_settings SET {key} = ? WHERE guild_id = ?", (value, guild_id))
+        conn.commit()
+
+def get_server_settings(guild_id: int) -> dict:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM server_settings WHERE guild_id = ?", (guild_id,))
         row = cursor.fetchone()
         if row:
             return dict(row)
-        return {"unban_channel_id": None, "ban_channel_id": None}
+        return {
+            "guild_id": guild_id,
+            "unban_channel_id": None,
+            "ban_channel_id": None,
+            "tick_channel_id": None,
+            "style": 1,
+            "autoban": 0,
+            "tg_bot_token": None,
+            "tg_chat_id": None
+        }
+
+def set_channel(guild_id: int, channel_type: str, channel_id: int):
+    col = f"{channel_type}_channel_id"
+    set_server_setting(guild_id, col, channel_id)
+
+def get_channels(guild_id: int) -> dict:
+    st = get_server_settings(guild_id)
+    return {
+        "unban_channel_id": st.get("unban_channel_id"),
+        "ban_channel_id": st.get("ban_channel_id"),
+        "tick_channel_id": st.get("tick_channel_id")
+    }
