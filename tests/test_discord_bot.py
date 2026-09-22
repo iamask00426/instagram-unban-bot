@@ -149,5 +149,17 @@ class TestDiscordBot(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(kwargs.get("embed"))
         self.assertIsNotNone(kwargs.get("file"))
 
+    def test_format_count(self):
+        from card_generator import format_count
+        self.assertEqual(format_count("38383773"), "38.4M")
+        self.assertEqual(format_count("2000000"), "2.0M")
+        self.assertEqual(format_count("736373"), "736.4K")
+        self.assertEqual(format_count("13069"), "13.1K")
+        self.assertEqual(format_count("10000"), "10K")
+        self.assertEqual(format_count("950"), "950")
+        self.assertEqual(format_count("12.5M"), "12.5M")
+        self.assertEqual(format_count("10k"), "10K")
+        self.assertEqual(format_count("38.4m"), "38.4M")
+
 if __name__ == "__main__":
     unittest.main()

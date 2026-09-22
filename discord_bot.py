@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 import database
 from config import Settings
 from monitoring import ProfileChecker, profile_session, CheckResult
-from card_generator import create_profile_card
+from card_generator import create_profile_card, format_count
 from telegram_forwarder import forward_to_telegram
 
 load_dotenv()
@@ -217,16 +217,17 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
 
         channel = await get_target_channel(guild, monitor_data, "unban")
 
+        folls_formatted = format_count(result.followers)
         content = (
             f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-            f"Followers: {result.followers} | Following: {result.following}\n"
+            f"Followers: {folls_formatted} | Following: {result.following}\n"
             f"⏱️ *Time taken: {elapsed_str}*"
         )
         if style == 4:
             content = (
                 f"⚰️ **BACK FROM THE GRAVE!** 🧟‍♂️\n"
                 f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-                f"Followers: {result.followers} | Following: {result.following}\n"
+                f"Followers: {folls_formatted} | Following: {result.following}\n"
                 f"⏱️ *Time taken: {elapsed_str}*"
             )
 
@@ -357,9 +358,10 @@ async def send_tick_alert(guild: discord.Guild, monitor_data: dict, result):
 
         channel = await get_target_channel(guild, monitor_data, "tick")
 
+        folls_formatted = format_count(result.followers)
         content = (
             f"🎉 **Verification Tick Detected!** | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-            f"Followers: {result.followers} | Following: {result.following}\n"
+            f"Followers: {folls_formatted} | Following: {result.following}\n"
             f"⏱️ *Time taken: {elapsed_str}*"
         )
 

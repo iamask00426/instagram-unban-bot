@@ -86,6 +86,45 @@ def get_card_fonts():
     d = ImageFont.load_default()
     return {"username": d, "btn": d, "stats_num": d, "stats_lbl": d, "name": d}
 
+def format_count(val) -> str:
+    """Format numeric counts into Instagram-style K/M/B strings (e.g. 736.4K, 38.4M)."""
+    if val is None:
+        return "0"
+    s = str(val).strip().replace(",", "")
+    if not s:
+        return "0"
+
+    if s[-1].lower() in ("k", "m", "b"):
+        num_part = s[:-1].strip()
+        suffix = s[-1].upper()
+        try:
+            f = float(num_part)
+            if f.is_integer():
+                return f"{int(f)}{suffix}"
+            return f"{f:.1f}{suffix}"
+        except ValueError:
+            return s.upper()
+
+    try:
+        num = float(s)
+    except ValueError:
+        return s
+
+    if num >= 1_000_000_000:
+        val_scaled = num / 1_000_000_000
+        return f"{val_scaled:.1f}B" if val_scaled % 1 != 0 else f"{int(val_scaled)}B"
+    elif num >= 1_000_000:
+        val_scaled = num / 1_000_000
+        return f"{val_scaled:.1f}M"
+    elif num >= 10_000:
+        val_scaled = num / 1_000
+        return f"{val_scaled:.1f}K" if val_scaled % 1 != 0 else f"{int(val_scaled)}K"
+    elif num >= 1_000:
+        val_scaled = num / 1_000
+        return f"{val_scaled:.1f}K" if val_scaled % 1 != 0 else f"{int(val_scaled)}K"
+    else:
+        return str(int(num))
+
 async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None, is_verified=False, style=1):
     """Creates a 1000x550 Pure Black High-Res Profile Card with zero-overlap dynamic layout"""
     width, height = 1000, 550
@@ -171,9 +210,9 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     for offset in [0, 14, 28]:
         draw.ellipse([dot_x+offset, dot_y, dot_x+offset+7, dot_y+7], fill='#ffffff')
 
-    posts_str = str(posts)
-    folls_str = str(followers)
-    follg_str = str(following)
+    posts_str = format_count(posts) if str(posts).replace(",", "").isdigit() and int(str(posts).replace(",", "")) >= 10_000 else str(posts)
+    folls_str = format_count(followers)
+    follg_str = format_count(following) if str(following).replace(",", "").isdigit() and int(str(following).replace(",", "")) >= 10_000 else str(following)
     st_y = 275
     st_lbl_y = 278
 
