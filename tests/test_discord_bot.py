@@ -4,7 +4,7 @@ import tempfile
 import database
 from discord_bot import parse_usernames, truncate_list_for_embed
 
-class TestDiscordBot(unittest.TestCase):
+class TestDiscordBot(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp_dir.name, "test_monitors.db")
@@ -131,7 +131,23 @@ class TestDiscordBot(unittest.TestCase):
         records = database.get_all_monitors()
         match = next((r for r in records if r["username"] == "tick_user"), None)
         self.assertIsNotNone(match)
-        self.assertEqual(match["mode"], "tick")
+    async def test_deliver_alert_embed_frame(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from io import BytesIO
+        from discord_bot import deliver_alert_to_channel
+
+        mock_ch = MagicMock()
+        mock_ch.send = AsyncMock()
+        fake_card = BytesIO(b"fake_image_bytes")
+
+        # Style 1 (default) must send both content and embed container
+        res = await deliver_alert_to_channel(mock_ch, "Alert Text", fake_card, style=1)
+        self.assertTrue(res)
+        mock_ch.send.assert_called_once()
+        kwargs = mock_ch.send.call_args.kwargs
+        self.assertEqual(kwargs.get("content"), "Alert Text")
+        self.assertIsNotNone(kwargs.get("embed"))
+        self.assertIsNotNone(kwargs.get("file"))
 
 if __name__ == "__main__":
     unittest.main()

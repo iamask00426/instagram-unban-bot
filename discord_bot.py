@@ -169,11 +169,13 @@ async def deliver_alert_to_channel(ch: discord.TextChannel, content: str, card_i
         card_io.seek(0)
         file = discord.File(card_io, filename="card.png")
         if style == 2:
+            embed = discord.Embed(description=content, color=0x2b2d31)
+            embed.set_image(url="attachment://card.png")
+            await ch.send(embed=embed, file=file)
+        else:
             embed = discord.Embed(color=0x2b2d31)
             embed.set_image(url="attachment://card.png")
             await ch.send(content=content, embed=embed, file=file)
-        else:
-            await ch.send(content=content, file=file)
         return True
     except discord.Forbidden:
         try:
@@ -638,14 +640,34 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
     else:
         time_str = "12 hours, 34 minutes, 56 seconds"
 
+    # Fetch live profile data if available so card has real avatar (pp), real posts, following & full name
+    posts = "0"
+    following = "0"
+    pic_url = None
+    full_name = target_user
+    is_verified = False
+
+    if checker:
+        try:
+            live_res = await asyncio.wait_for(checker.check(target_user.lower()), timeout=7.0)
+            if live_res and live_res.status == "active":
+                posts = live_res.posts if live_res.posts and live_res.posts != "?" else "0"
+                following = live_res.following if live_res.following and live_res.following != "?" else "0"
+                pic_url = live_res.pic_url
+                full_name = live_res.full_name or target_user
+                is_verified = live_res.is_verified
+        except Exception as e:
+            logging.warning(f"Could not fetch live profile for fakeunban @{target_user}: {e}")
+
     res = CheckResult(
         status="active",
         username=target_user.lower(),
         followers=followers,
-        following="100",
-        posts="10",
-        pic_url=None,
-        full_name=target_user
+        following=following,
+        posts=posts,
+        pic_url=pic_url,
+        full_name=full_name,
+        is_verified=is_verified
     )
 
     mon_data = {
