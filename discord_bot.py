@@ -84,6 +84,25 @@ def parse_usernames(text: str) -> list[str]:
 
     return usernames
 
+_alerting_keys: set[tuple[str, int]] = set()
+
+def truncate_list_for_embed(items: list[str], max_chars: int = 1000) -> str:
+    if not items:
+        return "None"
+    result = []
+    current_len = 0
+    for idx, item in enumerate(items):
+        formatted = f"`{item}`"
+        needed = len(formatted) + (1 if result else 0)
+        remaining = len(items) - idx
+        suffix = f" ... and {remaining} more"
+        if current_len + needed + len(suffix) > max_chars:
+            result.append(f"... and {remaining} more")
+            break
+        result.append(formatted)
+        current_len += needed
+    return " ".join(result)
+
 def format_elapsed(start_time: datetime) -> str:
     elapsed = datetime.now() - start_time
     h, rem = divmod(int(elapsed.total_seconds()), 3600)
@@ -131,60 +150,132 @@ async def get_target_channel(guild: discord.Guild, monitor_data: dict, mode: str
     return guild.text_channels[0] if guild.text_channels else None
 
 async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result):
-    raw_user = monitor_data["raw_username"]
-    start_time = datetime.fromisoformat(monitor_data["created_at"]) if isinstance(monitor_data["created_at"], str) else monitor_data["created_at"]
-    elapsed_str = format_elapsed(start_time)
-    channel = await get_target_channel(guild, monitor_data, "unban")
-    if not channel:
-        logging.error(f"No channel found to send unban alert for @{raw_user}")
+    username_key = (monitor_data["username"], monitor_data.get("guild_id", 0))
+    if username_key in _alerting_keys:
         return
-
-    content = (
-        f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-        f"*Followers {result.followers}   Following {result.following}*\n"
-        f"⏱️ *Time taken: {elapsed_str}*"
-    )
-
+    _alerting_keys.add(username_key)
     try:
-        card_io = await create_profile_card(
-            raw_user, result.followers, result.posts, result.following,
-            pic_url=result.pic_url, is_unavailable=False
-        )
-        file = discord.File(card_io, filename="card.png")
-        await channel.send(content=content, file=file)
-    except Exception as e:
-        logging.error(f"Error sending Discord card for @{raw_user}: {e}")
-        await channel.send(content=content)
+        raw_user = monitor_data["raw_username"]
+        start_time = datetime.fromisoformat(monitor_data["created_at"]) if isinstance(monitor_data["created_at"], str) else monitor_data["created_at"]
+        elapsed_str = format_elapsed(start_time)
+        channel = await get_target_channel(guild, monitor_data, "unban")
 
-    database.remove_monitor(monitor_data["username"])
+        content = (
+            f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
+            f"*Followers {result.followers}   Following {result.following}*\n"
+            f"⏱️ *Time taken: {elapsed_str}*"
+        )
+
+        target_channels = []
+        if channel:
+            target_channels.append(channel)
+        origin_id = monitor_data.get("channel_id")
+        if guild and origin_id:
+            origin_ch = guild.get_channel(origin_id)
+            if origin_ch and origin_ch not in target_channels:
+                target_channels.append(origin_ch)
+
+        card_io = None
+        try:
+            card_io = await create_profile_card(
+                raw_user, result.followers, result.posts, result.following,
+                pic_url=result.pic_url, is_unavailable=False
+            )
+        except Exception as e:
+            logging.error(f"Error creating Discord card for @{raw_user}: {e}")
+
+        sent = False
+        for ch in target_channels:
+            try:
+                if card_io:
+                    card_io.seek(0)
+                    file = discord.File(card_io, filename="card.png")
+                    await ch.send(content=content, file=file)
+                else:
+                    await ch.send(content=content)
+                sent = True
+                break
+            except discord.Forbidden:
+                try:
+                    await ch.send(content=content)
+                    sent = True
+                    break
+                except Exception:
+                    continue
+            except Exception as e:
+                logging.error(f"Failed sending alert to {ch}: {e}")
+                continue
+
+        if not sent:
+            logging.error(f"Could not deliver unban alert for @{raw_user}")
+
+        database.remove_monitor(monitor_data["username"], monitor_data.get("guild_id"))
+    finally:
+        _alerting_keys.discard(username_key)
 
 async def send_ban_alert(guild: discord.Guild, monitor_data: dict):
-    raw_user = monitor_data["raw_username"]
-    start_time = datetime.fromisoformat(monitor_data["created_at"]) if isinstance(monitor_data["created_at"], str) else monitor_data["created_at"]
-    elapsed_str = format_elapsed(start_time)
-    channel = await get_target_channel(guild, monitor_data, "ban")
-    if not channel:
-        logging.error(f"No channel found to send ban alert for @{raw_user}")
+    username_key = (monitor_data["username"], monitor_data.get("guild_id", 0))
+    if username_key in _alerting_keys:
         return
-
-    content = (
-        f"🚨 **Super-Fast Ban Alert!**\n\n"
-        f"[@{raw_user}](https://instagram.com/{raw_user}) has been **BANNED/DISABLED**!\n"
-        f"*Status: UserNotFound*\n"
-        f"⏱️ *Time taken: {elapsed_str}*"
-    )
-
+    _alerting_keys.add(username_key)
     try:
-        card_io = await create_profile_card(
-            raw_user, 0, 0, 0, pic_url=None, is_unavailable=True
-        )
-        file = discord.File(card_io, filename="card.png")
-        await channel.send(content=content, file=file)
-    except Exception as e:
-        logging.error(f"Error sending Discord ban card for @{raw_user}: {e}")
-        await channel.send(content=content)
+        raw_user = monitor_data["raw_username"]
+        start_time = datetime.fromisoformat(monitor_data["created_at"]) if isinstance(monitor_data["created_at"], str) else monitor_data["created_at"]
+        elapsed_str = format_elapsed(start_time)
+        channel = await get_target_channel(guild, monitor_data, "ban")
 
-    database.remove_monitor(monitor_data["username"])
+        content = (
+            f"🚨 **Super-Fast Ban Alert!**\n\n"
+            f"[@{raw_user}](https://instagram.com/{raw_user}) has been **BANNED/DISABLED**!\n"
+            f"*Status: UserNotFound*\n"
+            f"⏱️ *Time taken: {elapsed_str}*"
+        )
+
+        target_channels = []
+        if channel:
+            target_channels.append(channel)
+        origin_id = monitor_data.get("channel_id")
+        if guild and origin_id:
+            origin_ch = guild.get_channel(origin_id)
+            if origin_ch and origin_ch not in target_channels:
+                target_channels.append(origin_ch)
+
+        card_io = None
+        try:
+            card_io = await create_profile_card(
+                raw_user, 0, 0, 0, pic_url=None, is_unavailable=True
+            )
+        except Exception as e:
+            logging.error(f"Error creating ban card for @{raw_user}: {e}")
+
+        sent = False
+        for ch in target_channels:
+            try:
+                if card_io:
+                    card_io.seek(0)
+                    file = discord.File(card_io, filename="card.png")
+                    await ch.send(content=content, file=file)
+                else:
+                    await ch.send(content=content)
+                sent = True
+                break
+            except discord.Forbidden:
+                try:
+                    await ch.send(content=content)
+                    sent = True
+                    break
+                except Exception:
+                    continue
+            except Exception as e:
+                logging.error(f"Failed sending ban alert to {ch}: {e}")
+                continue
+
+        if not sent:
+            logging.error(f"Could not deliver ban alert for @{raw_user}")
+
+        database.remove_monitor(monitor_data["username"], monitor_data.get("guild_id"))
+    finally:
+        _alerting_keys.discard(username_key)
 
 async def instant_check(guild: discord.Guild, monitor_data: dict):
     """Executes immediate verification within 1-2s of command."""
@@ -320,15 +411,16 @@ async def clear_command(ctx, *, raw_input: str = None):
     if not usernames:
         return await ctx.send("❌ No valid usernames to clear.")
 
-    cleared, not_monitored = database.remove_monitors(usernames, ctx.guild.id if ctx.guild else 0)
+    guild_id = ctx.guild.id if ctx.guild else 0
+    cleared, not_monitored = database.remove_monitors(usernames, guild_id)
 
     embed = discord.Embed(
         title="Cleared Monitors",
         color=discord.Color.blue()
     )
 
-    cleared_text = " ".join(f"`{u}`" for u in cleared) if cleared else "None"
-    not_mon_text = " ".join(f"`{u}`" for u in not_monitored) if not_monitored else "None"
+    cleared_text = truncate_list_for_embed(cleared, max_chars=1000)
+    not_mon_text = truncate_list_for_embed(not_monitored, max_chars=1000)
 
     embed.add_field(name=f"Cleared [{len(cleared)}] username(s):", value=cleared_text, inline=False)
     embed.add_field(name=f"Not being monitored ([{len(not_monitored)}]):", value=not_mon_text, inline=False)
@@ -387,10 +479,62 @@ async def active_command(ctx):
 
     embed = discord.Embed(
         title=f"Active Monitors ({len(records)})",
-        description="\n".join(lines[:25]),  # Discord field limit safe
+        description="\n".join(lines[:25]),
         color=discord.Color.purple()
     )
+    if len(records) > 25:
+        embed.set_footer(text=f"Showing first 25 of {len(records)} active accounts")
     await ctx.send(embed=embed)
+
+@bot.command(name="help")
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="🤖 Instagram Monitor Bot - Commands",
+        description="Monitor Instagram accounts for unbans or bans in real-time.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(
+        name="🏆 `!unban <usernames/links>` (Aliases: `!bulk`, `!monitor`)",
+        value="Start monitoring accounts for unban / recovery. Supports multi-line input & profile links.",
+        inline=False
+    )
+    embed.add_field(
+        name="🚨 `!ban <usernames/links>` (Aliases: `!banmonitor`)",
+        value="Start monitoring active accounts for ban / deactivation.",
+        inline=False
+    )
+    embed.add_field(
+        name="🗑️ `!clear <usernames/links>`",
+        value="Remove specified accounts from monitoring.",
+        inline=False
+    )
+    embed.add_field(
+        name="📋 `!active` (Alias: `!list`)",
+        value="List all accounts currently being monitored with running timer.",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ `!channels`",
+        value="View current alert routing channel settings for this server.",
+        inline=False
+    )
+    embed.add_field(
+        name="🔧 Channel Configuration (Admin)",
+        value="• `!setunbanchannel [#channel]` - Route recovery alerts\n• `!setbanchannel [#channel]` - Route ban alerts",
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command (requires **Manage Channels**).")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ The specified channel was not found.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    else:
+        logging.error(f"Command error in {ctx.command}: {error}")
 
 async def main():
     global checker, profile_http_session

@@ -2,7 +2,7 @@ import unittest
 import os
 import tempfile
 import database
-from discord_bot import parse_usernames
+from discord_bot import parse_usernames, truncate_list_for_embed
 
 class TestDiscordBot(unittest.TestCase):
     def setUp(self):
@@ -27,6 +27,16 @@ class TestDiscordBot(unittest.TestCase):
         usernames = parse_usernames(raw_text)
         self.assertEqual(usernames, ["user_one", "user_two", "user_three", "user_four", "invalid"])
 
+    def test_truncate_list_for_embed(self):
+        short_list = ["user1", "user2"]
+        self.assertEqual(truncate_list_for_embed(short_list), "`user1` `user2`")
+        self.assertEqual(truncate_list_for_embed([]), "None")
+
+        long_list = [f"very_long_instagram_username_{i}" for i in range(100)]
+        result = truncate_list_for_embed(long_list, max_chars=100)
+        self.assertTrue(len(result) <= 100)
+        self.assertIn("more", result)
+
     def test_database_persistence_and_removal(self):
         # 1. Add monitors
         added = database.add_monitors(["alpha", "beta", "gamma"], "unban", 111, 222, 333)
@@ -46,6 +56,22 @@ class TestDiscordBot(unittest.TestCase):
         self.assertIn("beta", remaining)
         self.assertIn("gamma", remaining)
         self.assertNotIn("alpha", remaining)
+
+    def test_multi_guild_isolation(self):
+        # Both guild 100 and guild 200 monitor the same account
+        database.add_monitors(["shared_user"], "unban", 100, 11, 1)
+        database.add_monitors(["shared_user"], "unban", 200, 22, 2)
+
+        records = database.get_all_monitors()
+        self.assertEqual(len(records), 2)
+
+        # Clearing in guild 100 does not delete guild 200's monitor
+        cleared, _ = database.remove_monitors(["shared_user"], 100)
+        self.assertEqual(cleared, ["shared_user"])
+
+        remaining = database.get_all_monitors()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["guild_id"], 200)
 
     def test_channel_routing_settings(self):
         database.set_channel(999, "unban", 12345)

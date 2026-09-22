@@ -12,17 +12,41 @@ def get_connection():
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS monitors (
-                username TEXT PRIMARY KEY,
-                raw_username TEXT NOT NULL,
-                mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban')),
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                added_by INTEGER NOT NULL,
-                created_at TIMESTAMP NOT NULL
-            )
-        """)
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'")
+        row = cursor.fetchone()
+        if row and "PRIMARY KEY (username, guild_id)" not in row[0]:
+            cursor.execute("ALTER TABLE monitors RENAME TO monitors_old")
+            cursor.execute("""
+                CREATE TABLE monitors (
+                    username TEXT NOT NULL,
+                    raw_username TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban')),
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    added_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (username, guild_id)
+                )
+            """)
+            cursor.execute("""
+                INSERT OR IGNORE INTO monitors (username, raw_username, mode, guild_id, channel_id, added_by, created_at)
+                SELECT username, raw_username, mode, guild_id, channel_id, added_by, created_at FROM monitors_old
+            """)
+            cursor.execute("DROP TABLE monitors_old")
+        elif not row:
+            cursor.execute("""
+                CREATE TABLE monitors (
+                    username TEXT NOT NULL,
+                    raw_username TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('unban', 'ban')),
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    added_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (username, guild_id)
+                )
+            """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS channel_settings (
                 guild_id INTEGER PRIMARY KEY,
@@ -42,21 +66,17 @@ def add_monitors(usernames: list[str], mode: str, guild_id: int, channel_id: int
             key = clean.lower()
             if not key:
                 continue
-            cursor.execute("SELECT username FROM monitors WHERE username = ?", (key,))
-            existing = cursor.fetchone()
-            if not existing:
-                cursor.execute("""
-                    INSERT INTO monitors (username, raw_username, mode, guild_id, channel_id, added_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (key, clean, mode, guild_id, channel_id, added_by, now))
-                added.append(clean)
-            else:
-                # Update existing mode and channel if user re-adds
-                cursor.execute("""
-                    UPDATE monitors SET raw_username = ?, mode = ?, guild_id = ?, channel_id = ?, added_by = ?, created_at = ?
-                    WHERE username = ?
-                """, (clean, mode, guild_id, channel_id, added_by, now, key))
-                added.append(clean)
+            cursor.execute("""
+                INSERT INTO monitors (username, raw_username, mode, guild_id, channel_id, added_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username, guild_id) DO UPDATE SET
+                    raw_username = excluded.raw_username,
+                    mode = excluded.mode,
+                    channel_id = excluded.channel_id,
+                    added_by = excluded.added_by,
+                    created_at = excluded.created_at
+            """, (key, clean, mode, guild_id, channel_id, added_by, now))
+            added.append(clean)
         conn.commit()
     return added
 
@@ -70,20 +90,31 @@ def remove_monitors(usernames: list[str], guild_id: int = None) -> tuple[list[st
             key = clean.lower()
             if not key:
                 continue
-            cursor.execute("SELECT raw_username FROM monitors WHERE username = ?", (key,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute("DELETE FROM monitors WHERE username = ?", (key,))
-                cleared.append(row["raw_username"])
+            if guild_id:
+                cursor.execute("SELECT raw_username FROM monitors WHERE username = ? AND guild_id = ?", (key, guild_id))
+            else:
+                cursor.execute("SELECT raw_username FROM monitors WHERE username = ?", (key,))
+            rows = cursor.fetchall()
+            if rows:
+                if guild_id:
+                    cursor.execute("DELETE FROM monitors WHERE username = ? AND guild_id = ?", (key, guild_id))
+                else:
+                    cursor.execute("DELETE FROM monitors WHERE username = ?", (key,))
+                for r in rows:
+                    if r["raw_username"] not in cleared:
+                        cleared.append(r["raw_username"])
             else:
                 not_monitored.append(clean)
         conn.commit()
     return cleared, not_monitored
 
-def remove_monitor(username: str):
+def remove_monitor(username: str, guild_id: int = None):
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM monitors WHERE username = ?", (username.lower(),))
+        if guild_id:
+            cursor.execute("DELETE FROM monitors WHERE username = ? AND guild_id = ?", (username.lower(), guild_id))
+        else:
+            cursor.execute("DELETE FROM monitors WHERE username = ?", (username.lower(),))
         conn.commit()
 
 def get_all_monitors() -> list[dict]:

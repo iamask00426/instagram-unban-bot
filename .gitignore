@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+monitors.db
+monitors_old
+venv/
+Roboto-Bold.ttf
