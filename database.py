@@ -53,12 +53,29 @@ def init_db():
                 unban_channel_id INTEGER,
                 ban_channel_id INTEGER,
                 tick_channel_id INTEGER,
+                usernamechange_channel_id INTEGER,
                 style INTEGER DEFAULT 1,
                 autoban INTEGER DEFAULT 0,
                 tg_bot_token TEXT,
                 tg_chat_id TEXT
             )
         """)
+
+        # Migration: Add columns to monitors if missing
+        cursor.execute("PRAGMA table_info(monitors)")
+        cols = [col[1] for col in cursor.fetchall()]
+        if "user_id" not in cols:
+            cursor.execute("ALTER TABLE monitors ADD COLUMN user_id TEXT")
+        if "status" not in cols:
+            cursor.execute("ALTER TABLE monitors ADD COLUMN status TEXT DEFAULT 'monitoring'")
+        if "unbanned_at" not in cols:
+            cursor.execute("ALTER TABLE monitors ADD COLUMN unbanned_at REAL")
+
+        # Migration: Add usernamechange_channel_id to server_settings if missing
+        cursor.execute("PRAGMA table_info(server_settings)")
+        st_cols = [col[1] for col in cursor.fetchall()]
+        if "usernamechange_channel_id" not in st_cols:
+            cursor.execute("ALTER TABLE server_settings ADD COLUMN usernamechange_channel_id INTEGER")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS unban_history (
@@ -180,7 +197,7 @@ def reset_unban_stats(guild_id: int, window_seconds: int) -> int:
         return count
 
 def set_server_setting(guild_id: int, key: str, value):
-    valid_cols = {"unban_channel_id", "ban_channel_id", "tick_channel_id", "style", "autoban", "tg_bot_token", "tg_chat_id"}
+    valid_cols = {"unban_channel_id", "ban_channel_id", "tick_channel_id", "usernamechange_channel_id", "style", "autoban", "tg_bot_token", "tg_chat_id"}
     if key not in valid_cols:
         raise ValueError(f"Invalid server setting key: {key}")
     with get_connection() as conn:
@@ -205,6 +222,7 @@ def get_server_settings(guild_id: int) -> dict:
             "unban_channel_id": None,
             "ban_channel_id": None,
             "tick_channel_id": None,
+            "usernamechange_channel_id": None,
             "style": 1,
             "autoban": 0,
             "tg_bot_token": None,
@@ -220,5 +238,57 @@ def get_channels(guild_id: int) -> dict:
     return {
         "unban_channel_id": st.get("unban_channel_id"),
         "ban_channel_id": st.get("ban_channel_id"),
-        "tick_channel_id": st.get("tick_channel_id")
+        "tick_channel_id": st.get("tick_channel_id"),
+        "usernamechange_channel_id": st.get("usernamechange_channel_id")
     }
+
+def transition_to_username_tracking(username: str, guild_id: int, user_id: str, unbanned_at: float = None):
+    import time
+    if unbanned_at is None:
+        unbanned_at = time.time()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE monitors
+            SET status = 'tracking_username',
+                user_id = ?,
+                unbanned_at = ?
+            WHERE username = ? AND guild_id = ?
+        """, (str(user_id) if user_id else None, float(unbanned_at), username.lower(), guild_id))
+        conn.commit()
+
+def get_username_tracking_monitors() -> list[dict]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM monitors WHERE status = 'tracking_username' ORDER BY unbanned_at ASC")
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def update_tracked_username(old_username: str, new_username: str, guild_id: int):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE monitors
+            SET username = ?,
+                raw_username = ?
+            WHERE username = ? AND guild_id = ?
+        """, (new_username.lower(), new_username, old_username.lower(), guild_id))
+        conn.commit()
+
+def cleanup_expired_username_tracking(max_age_seconds: float = 86400) -> list[dict]:
+    import time
+    now = time.time()
+    expired = []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM monitors WHERE status = 'tracking_username'")
+        rows = cursor.fetchall()
+        for r in rows:
+            ub = r["unbanned_at"] or 0
+            if (now - ub) >= max_age_seconds:
+                expired.append(dict(r))
+        if expired:
+            for exp in expired:
+                cursor.execute("DELETE FROM monitors WHERE username = ? AND guild_id = ?", (exp["username"], exp["guild_id"]))
+            conn.commit()
+    return expired

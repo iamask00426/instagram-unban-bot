@@ -36,6 +36,7 @@ class CheckResult:
     retry_after: float = 0
     full_name: str = ""
     is_verified: bool = False
+    user_id: str | None = None
 
 
 @dataclass
@@ -72,6 +73,7 @@ class ProfileHTMLParser(HTMLParser):
         self.in_title = False
         self.title = ""
         self.is_verified = False
+        self.user_id = None
 
     def handle_starttag(self, tag, attrs):
         if self.boundary:
@@ -143,7 +145,7 @@ class ProfileHTMLParser(HTMLParser):
         if not full_name:
             full_name = self.username
         return CheckResult("active", self.username, counts[1], counts[2], counts[3],
-                           self.metadata.get("og:image") or None, 0, full_name, self.is_verified)
+                           self.metadata.get("og:image") or None, 0, full_name, self.is_verified, self.user_id)
 
 
 class BoundedBody:
@@ -207,7 +209,8 @@ def json_profile(data, username):
     pic = user.get("profile_pic_url_hd") or user.get("profile_pic_url")
     full_name = user.get("full_name") or username
     is_verified = bool(user.get("is_verified", False))
-    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name, is_verified)
+    uid = str(user.get("id") or user.get("pk") or "") or None
+    return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name, is_verified, uid)
 
 
 async def read_profile(response, username, settings, metrics):
@@ -218,12 +221,20 @@ async def read_profile(response, username, settings, metrics):
         body = BoundedBody(response, settings.body_limit, metrics)
         async for chunk in body:
             decoded = decoder.decode(chunk)
+            if not parser.user_id:
+                m_uid = re.search(r'[\"\'\\]*profile_id[\"\'\\]*[:=]\s*[\"\']?(\d{5,})[\"\']?', decoded)
+                if not m_uid:
+                    m_uid = re.search(r'\"id\":\"(\d{5,})\"', decoded)
+                if m_uid:
+                    parser.user_id = m_uid.group(1)
             if '"is_verified":true' in decoded or '"is_verified": true' in decoded:
                 parser.is_verified = True
             if settings.mode == "html":
                 parser.feed(decoded)
                 result = parser.result()
                 if result:
+                    if not result.user_id and parser.user_id:
+                        result.user_id = parser.user_id
                     return result
                 if parser.boundary or parser.invalid:
                     break
@@ -231,7 +242,10 @@ async def read_profile(response, username, settings, metrics):
                 text += decoded
         if settings.mode == "json" and body.complete:
             text += decoder.decode(b"", final=True)
-            return json_profile(json.loads(text), username) or CheckResult("unknown")
+            res = json_profile(json.loads(text), username) or CheckResult("unknown")
+            if parser.user_id and not res.user_id:
+                res.user_id = parser.user_id
+            return res
     except (ValueError, zlib.error, RecursionError):
         pass
     return CheckResult("unknown")
@@ -481,3 +495,43 @@ class MonitorScheduler:
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks.clear()
+
+async def fetch_user_id_by_username(session: aiohttp.ClientSession, proxy: str | None, username: str) -> str | None:
+    """Fetch Instagram UID for a username using lightweight HTML metadata check."""
+    username = normalize_username(username)
+    url = f"https://www.instagram.com/{username}/"
+    headers = {
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    try:
+        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                text = await resp.text()
+                m = re.search(r'[\"\'\\]*profile_id[\"\'\\]*[:=]\s*[\"\']?(\d{5,})[\"\']?', text)
+                if not m:
+                    m = re.search(r'\"id\":\"(\d{5,})\"', text)
+                if m:
+                    return m.group(1)
+    except Exception as e:
+        logging.warning(f"Error fetching UID for @{username}: {e}")
+    return None
+
+async def resolve_username_by_uid(session: aiohttp.ClientSession, proxy: str | None, user_id: str) -> str | None:
+    """Resolve current Instagram username for a given user_id."""
+    if not user_id:
+        return None
+    url = f"https://i.instagram.com/api/v1/users/{user_id}/info/"
+    headers = {
+        "User-Agent": "Instagram 275.0.0.27.98 Android (30/11; 480dpi; 1080x2400; OnePlus; GM1910; OnePlus7Pro; qcom; en_US; 314591244)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("user", {}).get("username")
+    except Exception as e:
+        logging.warning(f"Error resolving username for UID {user_id}: {e}")
+    return None

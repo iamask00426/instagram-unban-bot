@@ -161,5 +161,69 @@ class TestDiscordBot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(format_count("10k"), "10K")
         self.assertEqual(format_count("38.4m"), "38.4M")
 
+    def test_username_tracking_lifecycle(self):
+        import time
+        # 1. Add monitor in unban mode
+        database.add_monitors(["target_user"], "unban", 777, 10, 1)
+        records = database.get_all_monitors()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "monitoring")
+
+        # 2. Transition to username tracking with UID immediately upon unban
+        unban_ts = time.time()
+        database.transition_to_username_tracking("target_user", 777, "62439747944", unban_ts)
+
+        tracking = database.get_username_tracking_monitors()
+        self.assertEqual(len(tracking), 1)
+        self.assertEqual(tracking[0]["username"], "target_user")
+        self.assertEqual(tracking[0]["user_id"], "62439747944")
+        self.assertEqual(tracking[0]["status"], "tracking_username")
+        self.assertAlmostEqual(tracking[0]["unbanned_at"], unban_ts, delta=1.0)
+
+        # 3. Simulate username change: target_user -> new_cool_name
+        database.update_tracked_username("target_user", "new_cool_name", 777)
+        tracking_updated = database.get_username_tracking_monitors()
+        self.assertEqual(len(tracking_updated), 1)
+        self.assertEqual(tracking_updated[0]["username"], "new_cool_name")
+        self.assertEqual(tracking_updated[0]["raw_username"], "new_cool_name")
+        self.assertEqual(tracking_updated[0]["user_id"], "62439747944")
+
+        # 4. Expiration check: active account within 24h should NOT be cleaned up
+        exp_recent = database.cleanup_expired_username_tracking(max_age_seconds=86400)
+        self.assertEqual(len(exp_recent), 0)
+
+        # 5. Fast forward past 24 hours: should auto-stop and delete from DB
+        database.transition_to_username_tracking("new_cool_name", 777, "62439747944", time.time() - 86401)
+        exp_old = database.cleanup_expired_username_tracking(max_age_seconds=86400)
+        self.assertEqual(len(exp_old), 1)
+        self.assertEqual(exp_old[0]["username"], "new_cool_name")
+        self.assertEqual(len(database.get_username_tracking_monitors()), 0)
+
+    def test_usernamechange_channel_setting(self):
+        database.set_channel(888, "usernamechange", 555666)
+        channels = database.get_channels(888)
+        self.assertEqual(channels["usernamechange_channel_id"], 555666)
+
+    async def test_send_username_change_alert(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from discord_bot import send_username_change_alert
+
+        mock_guild = MagicMock()
+        mock_guild.id = 999
+        mock_ch = MagicMock()
+        mock_ch.send = AsyncMock()
+        mock_ch.name = "usernamechange"
+        mock_guild.text_channels = [mock_ch]
+        mock_guild.get_channel.return_value = mock_ch
+
+        mon_data = {"username": "olduser", "guild_id": 999, "channel_id": 123}
+        await send_username_change_alert(mock_guild, mon_data, "olduser", "newuser", "12345678")
+
+        mock_ch.send.assert_called_once()
+        kwargs = mock_ch.send.call_args.kwargs
+        self.assertIn("@olduser", kwargs["content"])
+        self.assertIn("@newuser", kwargs["content"])
+        self.assertIn("12345678", kwargs["content"])
+
 if __name__ == "__main__":
     unittest.main()

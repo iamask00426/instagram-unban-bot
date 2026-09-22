@@ -4,6 +4,7 @@ import os
 import re
 import asyncio
 import logging
+import time
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import urlsplit
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 
 import database
 from config import Settings
-from monitoring import ProfileChecker, profile_session, CheckResult
+from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
 from telegram_forwarder import forward_to_telegram
 
@@ -133,6 +134,8 @@ async def get_target_channel(guild: discord.Guild, monitor_data: dict, mode: str
         target_names = ["unbans-here", "unbans", "unban-alerts"]
     elif mode == "ban":
         target_names = ["bans-here", "bans", "ban-alerts"]
+    elif mode == "usernamechange":
+        target_names = ["usernamechange", "username-change", "usernamechanges", "username-changes", "name-changes", "namechange", "unbans-here"]
     else:  # tick
         target_names = ["ticks-here", "ticks", "tick-alerts", "unbans-here"]
 
@@ -145,7 +148,8 @@ async def get_target_channel(guild: discord.Guild, monitor_data: dict, mode: str
     env_map = {
         "unban": "DISCORD_UNBAN_CHANNEL_ID",
         "ban": "DISCORD_BAN_CHANNEL_ID",
-        "tick": "DISCORD_TICK_CHANNEL_ID"
+        "tick": "DISCORD_TICK_CHANNEL_ID",
+        "usernamechange": "DISCORD_USERNAMECHANGE_CHANNEL_ID"
     }
     env_ch_id = os.getenv(env_map.get(mode, ""), "").strip()
     if env_ch_id.isdigit():
@@ -269,8 +273,23 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
             card_io.seek(0)
         asyncio.create_task(forward_alert_if_configured(guild_id, content, card_io))
 
+        now_ts = time.time()
         if not is_fake:
-            database.remove_monitor(monitor_data["username"], guild_id)
+            # Requirements 1 & 2: Fetch UID and start 24h tracking immediately!
+            uid = getattr(result, "user_id", None)
+            if not uid and profile_http_session and settings:
+                proxy = next(checker.proxies) if checker and checker.proxies else None
+                try:
+                    uid = await fetch_user_id_by_username(profile_http_session, proxy, raw_user)
+                except Exception as e:
+                    logging.warning(f"Error fetching UID for @{raw_user}: {e}")
+
+            if uid:
+                database.transition_to_username_tracking(monitor_data["username"], guild_id, uid, now_ts)
+                logging.info(f"Started 24h username tracking immediately for @{raw_user} (UID: {uid}, Guild: {guild_id})")
+            else:
+                database.remove_monitor(monitor_data["username"], guild_id)
+
             if settings.get("autoban"):
                 database.add_monitors([raw_user], "ban", guild_id, monitor_data.get("channel_id", 0), 0)
                 logging.info(f"Autoban engaged for @{raw_user} in guild {guild_id}")
@@ -403,6 +422,41 @@ async def send_tick_alert(guild: discord.Guild, monitor_data: dict, result):
     finally:
         _alerting_keys.discard(username_key)
 
+async def send_username_change_alert(guild: discord.Guild, monitor_data: dict, old_name: str, new_name: str, uid: str):
+    """Send alert when a monitored unbanned account changes its username."""
+    if not guild:
+        return
+    channel = await get_target_channel(guild, monitor_data, "usernamechange")
+    if not channel:
+        channel = await get_target_channel(guild, monitor_data, "unban")
+    if not channel:
+        return
+
+    content = (
+        f"🔄 **Username Changed!**\n"
+        f"Old Name: `@{old_name}` ➡️ New Name: [@{new_name}](https://instagram.com/{new_name}) 🏆\n"
+        f"🆔 Instagram UID: `{uid}`"
+    )
+
+    embed = discord.Embed(
+        title="🔄 Instagram Username Change Detected",
+        description="An unbanned account under 24-hour monitoring has changed its username.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Old Username", value=f"`@{old_name}`", inline=True)
+    embed.add_field(name="New Username", value=f"[@{new_name}](https://instagram.com/{new_name})", inline=True)
+    embed.add_field(name="Instagram UID", value=f"`{uid}`", inline=False)
+    embed.set_footer(text="24-Hour Post-Unban Username Tracker")
+    embed.timestamp = datetime.now()
+
+    try:
+        await channel.send(content=content, embed=embed)
+    except Exception as e:
+        logging.error(f"Failed sending username change alert to {channel}: {e}")
+
+    guild_id = monitor_data.get("guild_id", 0)
+    asyncio.create_task(forward_alert_if_configured(guild_id, content))
+
 async def instant_check(guild: discord.Guild, monitor_data: dict):
     """Executes immediate verification within 1-2s of command."""
     if not checker:
@@ -427,12 +481,44 @@ async def monitoring_worker():
     
     while not bot.is_closed():
         try:
+            # 1. Clean up expired 24h username tracking accounts (> 86400s / 24h)
+            expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
+            for exp in expired:
+                logging.info(f"24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')}, Guild: {exp['guild_id']})")
+
+            # 2. Check 24h username tracking accounts using their user_id
+            tracking_records = database.get_username_tracking_monitors()
+            for rec in tracking_records:
+                if bot.is_closed():
+                    break
+                uid = rec.get("user_id")
+                if not uid:
+                    continue
+                old_username = rec.get("username")
+                old_raw = rec.get("raw_username")
+                guild_id = rec.get("guild_id")
+                guild = bot.get_guild(guild_id)
+
+                try:
+                    proxy = next(checker.proxies) if checker and checker.proxies else None
+                    current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
+                    if current_name and current_name.lower() != old_username.lower():
+                        logging.info(f"Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
+                        database.update_tracked_username(old_username, current_name, guild_id)
+                        await send_username_change_alert(guild, rec, old_raw, current_name, uid)
+                except Exception as e:
+                    logging.debug(f"Error checking UID {uid} for username change: {e}")
+
+                await asyncio.sleep(0.5)
+
+            # 3. Regular active unban/ban/tick monitors
             records = database.get_all_monitors()
-            if not records:
+            active_records = [r for r in records if r.get("status") != "tracking_username"]
+            if not active_records and not tracking_records:
                 await asyncio.sleep(2.0)
                 continue
 
-            for rec in records:
+            for rec in active_records:
                 if bot.is_closed():
                     break
                 username = rec["username"]
@@ -453,7 +539,7 @@ async def monitoring_worker():
 
                 await asyncio.sleep(1.0)
 
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
@@ -591,7 +677,14 @@ async def list_command(ctx, *, target: str = None):
 
     lines = []
     for r in records:
-        mode_icon = "🏆 Unban" if r["mode"] == "unban" else ("🚨 Ban" if r["mode"] == "ban" else "✅ Tick")
+        if r.get("status") == "tracking_username":
+            mode_icon = "🔄 24h Name Watch"
+        elif r["mode"] == "unban":
+            mode_icon = "🏆 Unban"
+        elif r["mode"] == "ban":
+            mode_icon = "🚨 Ban"
+        else:
+            mode_icon = "✅ Tick"
         st = datetime.fromisoformat(r["created_at"]) if isinstance(r["created_at"], str) else r["created_at"]
         elapsed = format_elapsed(st)
         lines.append(f"• **@{r['raw_username']}** ({mode_icon}) — *Running for {elapsed}*")
@@ -647,8 +740,7 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
     following = "0"
     pic_url = None
     full_name = target_user
-    is_verified = False
-
+    user_id = None
     if checker:
         try:
             live_res = await asyncio.wait_for(checker.check(target_user.lower()), timeout=7.0)
@@ -658,6 +750,7 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
                 pic_url = live_res.pic_url
                 full_name = live_res.full_name or target_user
                 is_verified = live_res.is_verified
+                user_id = getattr(live_res, "user_id", None)
         except Exception as e:
             logging.warning(f"Could not fetch live profile for fakeunban @{target_user}: {e}")
 
@@ -669,7 +762,8 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
         posts=posts,
         pic_url=pic_url,
         full_name=full_name,
-        is_verified=is_verified
+        is_verified=is_verified,
+        user_id=user_id
     )
 
     mon_data = {
@@ -910,6 +1004,15 @@ async def set_tick_channel_cmd(ctx, channel: discord.TextChannel = None):
     database.set_channel(ctx.guild.id, "tick", target.id)
     await ctx.send(f"✅ Tick alerts will now route to {target.mention} (`#ticks-here`).")
 
+@bot.command(name="setusernamechannel")
+@commands.has_permissions(manage_channels=True)
+async def set_username_channel_cmd(ctx, channel: discord.TextChannel = None):
+    if not ctx.guild:
+        return await ctx.send("❌ This command must be used within a server.")
+    target = channel or ctx.channel
+    database.set_channel(ctx.guild.id, "usernamechange", target.id)
+    await ctx.send(f"✅ Username change alerts will now route to {target.mention} (`#usernamechange`).")
+
 @bot.command(name="channels")
 async def show_channels_cmd(ctx):
     if not ctx.guild:
@@ -918,15 +1021,18 @@ async def show_channels_cmd(ctx):
     unban_ch = ctx.guild.get_channel(settings.get("unban_channel_id") or 0)
     ban_ch = ctx.guild.get_channel(settings.get("ban_channel_id") or 0)
     tick_ch = ctx.guild.get_channel(settings.get("tick_channel_id") or 0)
+    userchange_ch = ctx.guild.get_channel(settings.get("usernamechange_channel_id") or 0)
 
     unban_disp = unban_ch.mention if unban_ch else "#unbans-here (Default / Auto-detect)"
     ban_disp = ban_ch.mention if ban_ch else "#bans-here (Default / Auto-detect)"
     tick_disp = tick_ch.mention if tick_ch else "#ticks-here (Default / Auto-detect)"
+    userchange_disp = userchange_ch.mention if userchange_ch else "#usernamechange (Default / Auto-detect)"
 
     embed = discord.Embed(title="Channel Routing Settings", color=discord.Color.gold())
     embed.add_field(name="Unbans Channel", value=unban_disp, inline=False)
     embed.add_field(name="Bans Channel", value=ban_disp, inline=False)
     embed.add_field(name="Ticks Channel", value=tick_disp, inline=False)
+    embed.add_field(name="Username Change Channel", value=userchange_disp, inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="help")
@@ -978,6 +1084,7 @@ async def help_command(ctx):
             "• `!setunbanchannel [#channel]` — Route unbans\n"
             "• `!setbanchannel [#channel]` — Route bans\n"
             "• `!settickchannel [#channel]` — Route ticks\n"
+            "• `!setusernamechannel [#channel]` — Route username changes\n"
             "• `!channels` — View configured routing"
         ),
         inline=False
