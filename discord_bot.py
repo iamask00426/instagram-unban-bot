@@ -247,7 +247,7 @@ async def on_ready():
     logging.info(f"Logged in as {bot.user.name} ({bot.user.id})")
     database.init_db()
 
-@bot.command(name="unban")
+@bot.command(name="unban", aliases=["bulk", "monitor"])
 async def unban_command(ctx, *, raw_input: str = None):
     if not raw_input:
         return await ctx.send("❌ Usage: `!unban <list of usernames or links>`")
@@ -279,7 +279,7 @@ async def unban_command(ctx, *, raw_input: str = None):
         }
         asyncio.create_task(instant_check(ctx.guild, mon_rec))
 
-@bot.command(name="ban")
+@bot.command(name="ban", aliases=["banmonitor"])
 async def ban_command(ctx, *, raw_input: str = None):
     if not raw_input:
         return await ctx.send("❌ Usage: `!ban <list of usernames or links>`")
