@@ -4,6 +4,8 @@ Body counters measure bytes consumed by this application, NOT socket or billed
 bytes. aiohttp/TLS/the proxy may read ahead before an early response.close().
 """
 
+from __future__ import annotations
+
 import asyncio
 import codecs
 from collections import Counter
