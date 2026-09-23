@@ -64,17 +64,18 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
         settings = database.get_server_settings(chat_id) if chat_id else {}
         style = settings.get("style", 1)
 
-        folls_formatted = format_count(result.followers)
+        folls_val = str(result.followers).replace(",", "") if result.followers is not None else "0"
+        follg_val = str(result.following).replace(",", "") if result.following is not None else "0"
         caption = (
             f"Account Recovered | <a href='https://instagram.com/{raw_user}'>@{raw_user}</a> 🏆✅\n"
-            f"Followers: {folls_formatted} | Following: {result.following}\n"
+            f"<i>Followers: {folls_val} | Following: {follg_val}</i>\n"
             f"⏱️ <i>Time taken: {elapsed_str}</i>"
         )
         if style == 4:
             caption = (
                 f"⚰️ <b>BACK FROM THE GRAVE!</b> 🧟‍♂️\n"
                 f"Account Recovered | <a href='https://instagram.com/{raw_user}'>@{raw_user}</a> 🏆✅\n"
-                f"Followers: {folls_formatted} | Following: {result.following}\n"
+                f"<i>Followers: {folls_val} | Following: {follg_val}</i>\n"
                 f"⏱️ <i>Time taken: {elapsed_str}</i>"
             )
 

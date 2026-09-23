@@ -221,17 +221,18 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
 
         channel = await get_target_channel(guild, monitor_data, "unban")
 
-        folls_formatted = format_count(result.followers)
+        folls_val = str(result.followers).replace(",", "") if result.followers is not None else "0"
+        follg_val = str(result.following).replace(",", "") if result.following is not None else "0"
         content = (
             f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-            f"Followers: {folls_formatted} | Following: {result.following}\n"
+            f"*Followers: {folls_val} | Following: {follg_val}*\n"
             f"⏱️ *Time taken: {elapsed_str}*"
         )
         if style == 4:
             content = (
                 f"⚰️ **BACK FROM THE GRAVE!** 🧟‍♂️\n"
                 f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-                f"Followers: {folls_formatted} | Following: {result.following}\n"
+                f"*Followers: {folls_val} | Following: {follg_val}*\n"
                 f"⏱️ *Time taken: {elapsed_str}*"
             )
 
