@@ -742,6 +742,7 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
     pic_url = None
     full_name = target_user
     user_id = None
+    is_verified = False
     if checker:
         try:
             live_res = await asyncio.wait_for(checker.check(target_user.lower()), timeout=7.0)
