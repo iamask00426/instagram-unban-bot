@@ -1108,6 +1108,9 @@ async def main():
     database.init_db()
 
     env_dict = dict(os.environ)
+    tg_token = env_dict.get("BOT_TOKEN", "").strip()
+    if not tg_token or tg_token.startswith("your_"):
+        env_dict["BOT_TOKEN"] = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
     try:
         settings = Settings.from_env(env_dict)
     except ValueError as e:
