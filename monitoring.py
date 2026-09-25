@@ -19,6 +19,7 @@ import re
 import time
 from urllib.parse import urlsplit
 import zlib
+import logging
 
 import aiohttp
 
