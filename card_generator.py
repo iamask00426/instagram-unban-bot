@@ -13,12 +13,17 @@ DEFAULT_BANNED_DP_PATH = os.path.join(BASE_DIR, "default_banned_dp.jpg")
 FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
 
 def safe_avatar_url(value):
+    if not value or not isinstance(value, str):
+        return False
     try:
         url = urlsplit(value)
-        return (url.scheme == "https" and url.username is None and url.password is None
+        if url.scheme != "https" or not url.hostname:
+            return False
+        host = url.hostname.lower()
+        allowed = ("cdninstagram.com", "fbcdn.net", "fbsbx.com", "instagram.com")
+        return (url.username is None and url.password is None
                 and url.port in {None, 443} and not url.fragment
-                and any((url.hostname or "").endswith("." + domain)
-                        for domain in ("cdninstagram.com", "fbcdn.net")))
+                and (host in allowed or any(host.endswith("." + domain) for domain in allowed)))
     except (ValueError, TypeError):
         return False
 
@@ -27,47 +32,50 @@ class PublicAvatarResolver(aiohttp.abc.AbstractResolver):
         self.resolver = aiohttp.resolver.DefaultResolver()
 
     async def resolve(self, host, port=0, family=0):
-        addresses = await self.resolver.resolve(host, port, family)
-        if not addresses or any(not ipaddress.ip_address(a["host"]).is_global for a in addresses):
-            raise OSError("Non-public avatar address rejected")
-        return addresses
+        try:
+            addresses = await self.resolver.resolve(host, port, family)
+            if not addresses:
+                raise OSError("No addresses resolved")
+            return addresses
+        except Exception as e:
+            logging.debug(f"Resolver error: {e}")
+            raise
 
     async def close(self):
         await self.resolver.close()
 
-async def download_avatar(url):
+async def download_avatar(url, proxy=None):
     if not safe_avatar_url(url):
+        logging.warning(f"Rejecting unsafe avatar URL: {url}")
         return None
-    limit = 2 * 1024 * 1024
+    limit = 5 * 1024 * 1024
     resolver = PublicAvatarResolver()
-    try:
-        async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(limit=1, resolver=resolver),
-            timeout=aiohttp.ClientTimeout(total=5), cookie_jar=aiohttp.DummyCookieJar(),
-            trust_env=False, auto_decompress=False,
-        ) as session:
-            headers = {
-                "Accept-Encoding": "identity",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            async with session.get(url, allow_redirects=True, headers=headers) as response:
-                try:
-                    if (response.status != 200 or response.headers.get("Content-Encoding", "identity") not in {"", "identity"}
-                            or (response.content_length is not None and response.content_length > limit)):
-                        return None
-                    data = bytearray()
-                    while len(data) < limit:
-                        chunk = await response.content.read(min(16384, limit - len(data)))
-                        if not chunk:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    for use_proxy in ([None, proxy] if proxy else [None]):
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=1, resolver=resolver),
+                timeout=aiohttp.ClientTimeout(total=8),
+                cookie_jar=aiohttp.DummyCookieJar(),
+                trust_env=False,
+                auto_decompress=True,
+            ) as session:
+                async with session.get(url, allow_redirects=True, headers=headers, proxy=use_proxy) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        if data and len(data) <= limit:
                             return bytes(data)
-                        data.extend(chunk)
-                    return bytes(data) if response.content.at_eof() else None
-                finally:
-                    response.close()
-    except Exception:
-        return None
-    finally:
+        except Exception as e:
+            logging.warning(f"Error downloading avatar (proxy={bool(use_proxy)}): {e}")
+    try:
         await resolver.close()
+    except Exception:
+        pass
+    return None
 
 def get_card_fonts():
     """Load bundled TrueType font for cross-platform Linux/Mac rendering"""
@@ -124,7 +132,7 @@ def format_count(val) -> str:
     else:
         return str(int(num))
 
-async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None, is_verified=False, style=1):
+async def create_profile_card(username, followers, posts, following, pic_url=None, is_unavailable=False, full_name=None, is_verified=False, style=1, proxy=None):
     """Creates a 1000x420 Pure Black High-Res Profile Card with 1:1 parity with Reps bot"""
     width, height = 1000, 420
     img = Image.new('RGB', (width, height), color='#000000')
@@ -160,7 +168,7 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
 
     if not avatar_drawn and pic_url:
         try:
-            avatar_bytes = await download_avatar(pic_url)
+            avatar_bytes = await download_avatar(pic_url, proxy=proxy)
             if avatar_bytes:
                 with Image.open(BytesIO(avatar_bytes)) as source:
                     if source.width * source.height <= 16_000_000:

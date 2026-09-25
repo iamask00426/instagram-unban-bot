@@ -248,12 +248,18 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
         full_name = getattr(result, "full_name", "") or raw_user
         is_verified = getattr(result, "is_verified", False)
         card_io = None
+        card_proxy = None
+        if checker and hasattr(checker, "proxies"):
+            try:
+                card_proxy = next(checker.proxies)
+            except Exception:
+                pass
         if style != 3:
             try:
                 card_io = await create_profile_card(
                     raw_user, result.followers, result.posts, result.following,
                     pic_url=result.pic_url, is_unavailable=False, full_name=full_name,
-                    is_verified=is_verified, style=style
+                    is_verified=is_verified, style=style, proxy=card_proxy
                 )
             except Exception as e:
                 logging.error(f"Error creating card for @{raw_user}: {e}")
@@ -717,6 +723,96 @@ async def kill_command(ctx, *, raw_input: str = None):
     await send_ban_alert(ctx.guild, mon_data, is_fake=True)
     await ctx.send(f"💀 Fake ban alert dispatched for `@{target_user}`.")
 
+async def resolve_instagram_profile_data(username: str, checker: ProfileChecker = None) -> dict:
+    data = {
+        "pic_url": None,
+        "posts": "0",
+        "following": "0",
+        "full_name": username,
+        "user_id": None,
+        "is_verified": False,
+    }
+    # 1. Try checker first
+    if checker:
+        try:
+            live_res = await asyncio.wait_for(checker.check(username.lower()), timeout=6.0)
+            if live_res and live_res.status == "active":
+                if live_res.posts and live_res.posts != "?": data["posts"] = live_res.posts
+                if live_res.following and live_res.following != "?": data["following"] = live_res.following
+                if live_res.pic_url: data["pic_url"] = live_res.pic_url
+                if live_res.full_name: data["full_name"] = live_res.full_name
+                data["is_verified"] = getattr(live_res, "is_verified", False)
+                data["user_id"] = getattr(live_res, "user_id", None)
+                if data["pic_url"]:
+                    return data
+        except Exception as e:
+            logging.debug(f"checker.check failed for @{username}: {e}")
+
+    # 2. Try JSON web_profile_info with proxy and sessionid
+    proxy = None
+    if checker and hasattr(checker, "proxies"):
+        try:
+            proxy = next(checker.proxies)
+        except Exception:
+            pass
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "X-IG-App-ID": "936619743392459",
+        "Accept": "*/*",
+    }
+    session_id = os.getenv("IG_SESSIONID", "").strip()
+    if session_id:
+        headers["Cookie"] = f"sessionid={session_id};"
+
+    endpoints = [
+        f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username.lower()}",
+        f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username.lower()}",
+    ]
+    for ep in endpoints:
+        if data["pic_url"]:
+            break
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as s:
+                async with s.get(ep, headers=headers, proxy=proxy) as r:
+                    if r.status == 200:
+                        json_resp = await r.json()
+                        user_obj = json_resp.get("data", {}).get("user", {})
+                        if user_obj:
+                            pic = user_obj.get("profile_pic_url_hd") or user_obj.get("profile_pic_url")
+                            if pic: data["pic_url"] = pic
+                            if user_obj.get("full_name"): data["full_name"] = user_obj.get("full_name")
+                            data["is_verified"] = bool(user_obj.get("is_verified", False))
+                            if user_obj.get("id"): data["user_id"] = str(user_obj["id"])
+                            fol = user_obj.get("edge_follow", {}).get("count")
+                            if fol is not None: data["following"] = str(fol)
+                            med = user_obj.get("edge_owner_to_timeline_media", {}).get("count")
+                            if med is not None: data["posts"] = str(med)
+        except Exception as e:
+            logging.debug(f"JSON endpoint {ep} error: {e}")
+
+    # 3. If pic_url is STILL None, try HTML scrape with modern iPhone UA
+    if not data["pic_url"]:
+        try:
+            m_headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as s:
+                async with s.get(f"https://www.instagram.com/{username.lower()}/", headers=m_headers, proxy=proxy) as r:
+                    if r.status == 200:
+                        html_text = await r.text()
+                        m_img = re.search(r'<meta\s+property=[\"\']og:image[\"\']\s+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
+                        if not m_img:
+                            m_img = re.search(r'content=[\"\']([^\"\']+)[\"\']\s+property=[\"\']og:image[\"\']', html_text, re.I)
+                        if m_img:
+                            data["pic_url"] = m_img.group(1).replace("&amp;", "&")
+        except Exception as e:
+            logging.debug(f"HTML fallback error: {e}")
+
+    return data
+
 @bot.command(name="fakeunban")
 async def fakeunban_command(ctx, username: str = None, followers: str = None, *, elapsed_time: str = None):
     if not username or not followers:
@@ -736,36 +832,19 @@ async def fakeunban_command(ctx, username: str = None, followers: str = None, *,
     else:
         time_str = "12 hours, 34 minutes, 56 seconds"
 
-    # Fetch live profile data if available so card has real avatar (pp), real posts, following & full name
-    posts = "0"
-    following = "0"
-    pic_url = None
-    full_name = target_user
-    user_id = None
-    is_verified = False
-    if checker:
-        try:
-            live_res = await asyncio.wait_for(checker.check(target_user.lower()), timeout=7.0)
-            if live_res and live_res.status == "active":
-                posts = live_res.posts if live_res.posts and live_res.posts != "?" else "0"
-                following = live_res.following if live_res.following and live_res.following != "?" else "0"
-                pic_url = live_res.pic_url
-                full_name = live_res.full_name or target_user
-                is_verified = live_res.is_verified
-                user_id = getattr(live_res, "user_id", None)
-        except Exception as e:
-            logging.warning(f"Could not fetch live profile for fakeunban @{target_user}: {e}")
+    # Fetch live profile data so card has real avatar (pp), real posts, following & full name
+    prof_data = await resolve_instagram_profile_data(target_user, checker)
 
     res = CheckResult(
         status="active",
         username=target_user.lower(),
         followers=followers,
-        following=following,
-        posts=posts,
-        pic_url=pic_url,
-        full_name=full_name,
-        is_verified=is_verified,
-        user_id=user_id
+        following=prof_data["following"],
+        posts=prof_data["posts"],
+        pic_url=prof_data["pic_url"],
+        full_name=prof_data["full_name"],
+        is_verified=prof_data["is_verified"],
+        user_id=prof_data["user_id"]
     )
 
     mon_data = {
@@ -1105,6 +1184,11 @@ async def on_command_error(ctx, error):
         logging.error(f"Command error in {ctx.command}: {error}")
 
 async def main():
+    if any(os.getenv(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID")):
+        logging.info("Railway environment detected. Discord bot running on Contabo VPS. Exiting to avoid duplicates.")
+        await asyncio.sleep(3600)
+        return
+
     global checker, profile_http_session
     database.init_db()
 
