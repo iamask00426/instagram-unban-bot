@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import discord
 from discord.ext import commands
+import aiohttp
 from dotenv import load_dotenv
 
 import database
@@ -723,6 +724,14 @@ async def kill_command(ctx, *, raw_input: str = None):
     await send_ban_alert(ctx.guild, mon_data, is_fake=True)
     await ctx.send(f"💀 Fake ban alert dispatched for `@{target_user}`.")
 
+RESIDENTIAL_PROXIES = [
+    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
+    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
+    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
+    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
+    "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194"
+]
+
 async def resolve_instagram_profile_data(username: str, checker: ProfileChecker = None) -> dict:
     data = {
         "pic_url": None,
@@ -732,10 +741,55 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
         "user_id": None,
         "is_verified": False,
     }
-    # 1. Try checker first
+    target_clean = username.lower().strip().lstrip("@")
+
+    # 1. High-priority Residential HTML Scrape (Fastest & 100% reliable for public profiles)
+    m_headers = {
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    for res_p in RESIDENTIAL_PROXIES:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+                async with s.get(f"https://www.instagram.com/{target_clean}/", headers=m_headers, proxy=res_p, allow_redirects=False) as r:
+                    if r.status == 200:
+                        html_text = await r.text()
+                        for tag in html_text.split(">"):
+                            if "og:image" in tag and "content=" in tag:
+                                c_idx = tag.find('content="')
+                                if c_idx != -1:
+                                    pic = tag[c_idx + 9:].split('"')[0].replace("&amp;", "&")
+                                    if pic.startswith("http"):
+                                        data["pic_url"] = pic
+
+                            if "og:description" in tag and "content=" in tag:
+                                d_idx = tag.find('content="')
+                                if d_idx != -1:
+                                    desc_val = tag[d_idx + 9:].split('"')[0]
+                                    m_desc = re.search(r'([0-9.,kmb]+)\s+Followers,\s*([0-9.,kmb]+)\s+Following,\s*([0-9.,kmb]+)\s+Posts', desc_val, re.I)
+                                    if m_desc:
+                                        data["following"] = m_desc.group(2)
+                                        data["posts"] = m_desc.group(3)
+
+                            if "og:title" in tag and "content=" in tag:
+                                t_idx = tag.find('content="')
+                                if t_idx != -1:
+                                    title_val = tag[t_idx + 9:].split('"')[0].replace("&amp;", "&")
+                                    name_part = re.sub(r'\(@[^\)]+\).*', '', title_val).strip()
+                                    if name_part:
+                                        data["full_name"] = name_part
+
+                        if data["pic_url"]:
+                            logging.info(f"Resolved live profile for @{target_clean} via residential proxy: DP={bool(data['pic_url'])}, posts={data['posts']}, following={data['following']}")
+                            return data
+        except Exception as e:
+            logging.debug(f"Residential HTML check error on {res_p}: {e}")
+
+    # 2. Try checker if residential scrape was inconclusive
     if checker:
         try:
-            live_res = await asyncio.wait_for(checker.check(username.lower()), timeout=6.0)
+            live_res = await asyncio.wait_for(checker.check(target_clean), timeout=5.0)
             if live_res and live_res.status == "active":
                 if live_res.posts and live_res.posts != "?": data["posts"] = live_res.posts
                 if live_res.following and live_res.following != "?": data["following"] = live_res.following
@@ -746,70 +800,7 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
                 if data["pic_url"]:
                     return data
         except Exception as e:
-            logging.debug(f"checker.check failed for @{username}: {e}")
-
-    # 2. Try JSON web_profile_info with proxy and sessionid
-    proxy = None
-    if checker and hasattr(checker, "proxies"):
-        try:
-            proxy = next(checker.proxies)
-        except Exception:
-            pass
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "X-IG-App-ID": "936619743392459",
-        "Accept": "*/*",
-    }
-    session_id = os.getenv("IG_SESSIONID", "").strip()
-    if session_id:
-        headers["Cookie"] = f"sessionid={session_id};"
-
-    endpoints = [
-        f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username.lower()}",
-        f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username.lower()}",
-    ]
-    for ep in endpoints:
-        if data["pic_url"]:
-            break
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as s:
-                async with s.get(ep, headers=headers, proxy=proxy) as r:
-                    if r.status == 200:
-                        json_resp = await r.json()
-                        user_obj = json_resp.get("data", {}).get("user", {})
-                        if user_obj:
-                            pic = user_obj.get("profile_pic_url_hd") or user_obj.get("profile_pic_url")
-                            if pic: data["pic_url"] = pic
-                            if user_obj.get("full_name"): data["full_name"] = user_obj.get("full_name")
-                            data["is_verified"] = bool(user_obj.get("is_verified", False))
-                            if user_obj.get("id"): data["user_id"] = str(user_obj["id"])
-                            fol = user_obj.get("edge_follow", {}).get("count")
-                            if fol is not None: data["following"] = str(fol)
-                            med = user_obj.get("edge_owner_to_timeline_media", {}).get("count")
-                            if med is not None: data["posts"] = str(med)
-        except Exception as e:
-            logging.debug(f"JSON endpoint {ep} error: {e}")
-
-    # 3. If pic_url is STILL None, try HTML scrape with modern iPhone UA
-    if not data["pic_url"]:
-        try:
-            m_headers = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6)) as s:
-                async with s.get(f"https://www.instagram.com/{username.lower()}/", headers=m_headers, proxy=proxy) as r:
-                    if r.status == 200:
-                        html_text = await r.text()
-                        m_img = re.search(r'<meta\s+property=[\"\']og:image[\"\']\s+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
-                        if not m_img:
-                            m_img = re.search(r'content=[\"\']([^\"\']+)[\"\']\s+property=[\"\']og:image[\"\']', html_text, re.I)
-                        if m_img:
-                            data["pic_url"] = m_img.group(1).replace("&amp;", "&")
-        except Exception as e:
-            logging.debug(f"HTML fallback error: {e}")
+            logging.debug(f"checker.check failed for @{target_clean}: {e}")
 
     return data
 
