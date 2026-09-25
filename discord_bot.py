@@ -887,10 +887,20 @@ async def lookup_command(ctx, *, raw_input: str = None):
     except Exception as e:
         await msg.edit(content=f"❌ Error checking profile: {e}")
 
-@bot.command(name="clear")
+@bot.command(name="clear", aliases=["cleal"])
 async def clear_command(ctx, *, raw_input: str = None):
     if not raw_input:
-        return await ctx.send("❌ Usage: `!clear <list of usernames or links>`")
+        return await ctx.send("❌ Usage: `!clear <list of usernames>` or `!clear all` to remove all monitors.")
+
+    if raw_input.strip().lower() in ("all", "*"):
+        guild_id = ctx.guild.id if ctx.guild else 0
+        count = database.clear_all_monitors(guild_id)
+        embed = discord.Embed(
+            title="Cleared All Monitors",
+            description=f"🗑️ Successfully removed all **{count}** monitored account(s).",
+            color=discord.Color.orange()
+        )
+        return await ctx.send(embed=embed)
 
     usernames = parse_usernames(raw_input)
     if not usernames:
@@ -912,15 +922,13 @@ async def clear_command(ctx, *, raw_input: str = None):
 
     await ctx.send(embed=embed)
 
-@bot.command(name="clearall")
-@commands.has_permissions(manage_channels=True)
+@bot.command(name="clearall", aliases=["clealall", "clear_all"])
 async def clear_all_command(ctx):
-    if not ctx.guild:
-        return await ctx.send("❌ This command must be used within a server.")
-    count = database.clear_all_monitors(ctx.guild.id)
+    guild_id = ctx.guild.id if ctx.guild else 0
+    count = database.clear_all_monitors(guild_id)
     embed = discord.Embed(
         title="Cleared All Monitors",
-        description=f"🗑️ Successfully removed all **{count}** monitored account(s) for this server.",
+        description=f"🗑️ Successfully removed all **{count}** monitored account(s).",
         color=discord.Color.orange()
     )
     await ctx.send(embed=embed)
