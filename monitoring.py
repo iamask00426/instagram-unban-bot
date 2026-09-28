@@ -504,17 +504,17 @@ async def fetch_user_id_by_username(session: aiohttp.ClientSession, proxy: str |
     headers = {
         "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
     }
     try:
-        async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-            if resp.status == 200:
-                text = await resp.text()
-                m = re.search(r'[\"\'\\]*profile_id[\"\'\\]*[:=]\s*[\"\']?(\d{5,})[\"\']?', text)
-                if not m:
-                    m = re.search(r'\"id\":\"(\d{5,})\"', text)
-                if m:
-                    return m.group(1)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as temp_session:
+            async with temp_session.get(url, headers=headers, proxy=proxy) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    m = re.search(r'[\"\'\\]*profile_id[\"\'\\]*[:=]\s*[\"\']?(\d{5,})[\"\']?', text)
+                    if not m:
+                        m = re.search(r'\"id\":\"(\d{5,})\"', text)
+                    if m:
+                        return m.group(1)
     except Exception as e:
         logging.warning(f"Error fetching UID for @{username}: {e}")
     return None

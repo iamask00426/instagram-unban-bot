@@ -15,7 +15,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 import database
-from config import Settings
+from config import Settings, extract_username, parse_usernames
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
 from telegram_forwarder import forward_to_telegram
@@ -36,56 +36,6 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 checker = None
 profile_http_session = None
 
-def parse_usernames(text: str) -> list[str]:
-    """
-    Extract ONLY valid Instagram usernames from multiline text, URLs, or handles.
-    """
-    raw_tokens = re.split(r'[\r\n,\s]+', text)
-    usernames = []
-    seen = set()
-
-    for token in raw_tokens:
-        token = token.strip()
-        if not token:
-            continue
-
-        # If it's an explicit URL
-        if token.startswith(('http://', 'https://')):
-            try:
-                parsed = urlsplit(token)
-                if parsed.hostname not in {'instagram.com', 'www.instagram.com'}:
-                    continue
-                path = parsed.path.strip('/')
-                parts = [p for p in path.split('/') if p]
-                if parts:
-                    token = parts[0]
-                else:
-                    continue
-            except Exception:
-                continue
-        elif 'instagram.com/' in token:
-            try:
-                parsed = urlsplit('https://' + token)
-                path = parsed.path.strip('/')
-                parts = [p for p in path.split('/') if p]
-                if parts:
-                    token = parts[0]
-                else:
-                    continue
-            except Exception:
-                continue
-
-        token = token.split('?')[0].split('&')[0].strip('/')
-        if token.startswith('@'):
-            token = token[1:]
-
-        token = token.lower()
-        if re.fullmatch(r'[a-zA-Z0-9_.]{1,30}', token):
-            if token not in seen:
-                seen.add(token)
-                usernames.append(token)
-
-    return usernames
 
 _alerting_keys: set[tuple[str, int]] = set()
 

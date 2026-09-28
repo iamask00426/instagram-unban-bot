@@ -1,29 +1,65 @@
+from __future__ import annotations
+
 """Import-safe configuration; environment and .env are read only at startup."""
 
 from dataclasses import dataclass
 import math
 import re
+from typing import Optional
 from urllib.parse import quote, unquote, urlsplit
 
 
 USERNAME = re.compile(r"[a-zA-Z0-9_](?:[a-zA-Z0-9_.]{0,28}[a-zA-Z0-9_])?\Z")
 
 
+def extract_username(token: str) -> str | None:
+    if not token or not isinstance(token, str):
+        return None
+    token = token.strip()
+    if not token:
+        return None
+
+    # Strip surrounding markdown, brackets, quotes, angle brackets, punctuation
+    token = token.strip("<>\"'()[]{}.,;`")
+
+    lower_token = token.lower()
+    if "instagram.com/" in lower_token or "instagr.am/" in lower_token:
+        if not (lower_token.startswith("http://") or lower_token.startswith("https://")):
+            token = "https://" + token
+        try:
+            parsed = urlsplit(token)
+            path = parsed.path.strip("/")
+            parts = [p for p in path.split("/") if p]
+            if not parts:
+                return None
+            candidate = parts[0]
+            if candidate.lower() == "stories" and len(parts) > 1 and parts[1].lower() != "highlights":
+                candidate = parts[1]
+            elif candidate.lower() in {"p", "reel", "reels", "stories", "tv", "explore", "direct", "accounts", "about", "developer", "legal"}:
+                return None
+            token = candidate
+        except Exception:
+            return None
+
+    # Strip query/fragments and trailing/leading slashes
+    token = token.split("?")[0].split("&")[0].split("#")[0].strip("/")
+
+    # Strip leading @ or /
+    token = token.lstrip("@/").strip()
+    token = token.lower()
+
+    if re.fullmatch(r"[a-z0-9_.]{1,30}", token) and ".." not in token:
+        token = token.strip(".")
+        if token and re.fullmatch(r"[a-z0-9_.]{1,30}", token):
+            return token
+    return None
+
+
 def normalize_username(value: str) -> str:
-    value = value.strip()
-    if value.startswith(("https://", "http://")):
-        url = urlsplit(value)
-        if (url.hostname not in {"instagram.com", "www.instagram.com"}
-                or url.netloc != url.hostname or url.query or url.fragment):
-            raise ValueError("Use a username or a plain Instagram profile URL.")
-        value = url.path.strip("/")
-    elif value.startswith(("instagram.com/", "www.instagram.com/")):
-        return normalize_username("https://" + value)
-    elif value.startswith("@"):
-        value = value[1:]
-    if not USERNAME.fullmatch(value) or ".." in value:
-        raise ValueError("Username must be 1–30 letters, digits, underscores or internal dots.")
-    return value.lower()
+    cleaned = extract_username(value)
+    if not cleaned:
+        raise ValueError("Use a valid Instagram username or profile link.")
+    return cleaned
 
 
 def is_example(value: str) -> bool:
@@ -124,49 +160,17 @@ def parse_usernames(text: str) -> list[str]:
     """
     Extract ONLY valid Instagram usernames from multiline text, URLs, or handles.
     """
-    raw_tokens = re.split(r'[\r\n,\s]+', text)
+    if not text:
+        return []
+    raw_tokens = re.split(r'[\r\n,\s]+', str(text))
     usernames = []
     seen = set()
 
     for token in raw_tokens:
-        token = token.strip()
-        if not token:
-            continue
-
-        # If it's an explicit URL
-        if token.startswith(('http://', 'https://')):
-            try:
-                parsed = urlsplit(token)
-                if parsed.hostname not in {'instagram.com', 'www.instagram.com'}:
-                    continue
-                path = parsed.path.strip('/')
-                parts = [p for p in path.split('/') if p]
-                if parts:
-                    token = parts[0]
-                else:
-                    continue
-            except Exception:
-                continue
-        elif 'instagram.com/' in token:
-            try:
-                parsed = urlsplit('https://' + token)
-                path = parsed.path.strip('/')
-                parts = [p for p in path.split('/') if p]
-                if parts:
-                    token = parts[0]
-                else:
-                    continue
-            except Exception:
-                continue
-
-        token = token.split('?')[0].split('&')[0].strip('/')
-        if token.startswith('@'):
-            token = token[1:]
-
-        token = token.lower()
-        if re.fullmatch(r'[a-zA-Z0-9_.]{1,30}', token):
-            if token not in seen:
-                seen.add(token)
-                usernames.append(token)
+        clean = extract_username(token)
+        if clean and clean not in seen:
+            seen.add(clean)
+            usernames.append(clean)
 
     return usernames
+
