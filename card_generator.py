@@ -107,6 +107,8 @@ def format_count(val) -> str:
         suffix = s[-1].lower()
         try:
             f = float(num_part)
+            if suffix == "k" and f >= 10:
+                return f"{f:.1f}k"
             if f.is_integer():
                 return f"{int(f)}{suffix}"
             return f"{f:.1f}{suffix}"
@@ -126,7 +128,7 @@ def format_count(val) -> str:
         return f"{val_scaled:.1f}m" if val_scaled % 1 != 0 else f"{int(val_scaled)}m"
     elif num >= 10_000:
         val_scaled = num / 1_000
-        return f"{val_scaled:.1f}k" if val_scaled % 1 != 0 else f"{int(val_scaled)}k"
+        return f"{val_scaled:.1f}k"
     elif num >= 1_000:
         return f"{int(num):,}"
     else:

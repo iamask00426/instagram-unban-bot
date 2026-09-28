@@ -68,14 +68,14 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
         follg_val = str(result.following).replace(",", "") if result.following is not None else "0"
         caption = (
             f"Account Recovered | <a href='https://instagram.com/{raw_user}'>@{raw_user}</a> 🏆✅\n"
-            f"<i>Followers: {folls_val} | Following: {follg_val}</i>\n"
+            f"Followers: {folls_val} | Following: {follg_val}\n"
             f"⏱️ <i>Time taken: {elapsed_str}</i>"
         )
         if style == 4:
             caption = (
                 f"⚰️ <b>BACK FROM THE GRAVE!</b> 🧟‍♂️\n"
                 f"Account Recovered | <a href='https://instagram.com/{raw_user}'>@{raw_user}</a> 🏆✅\n"
-                f"<i>Followers: {folls_val} | Following: {follg_val}</i>\n"
+                f"Followers: {folls_val} | Following: {follg_val}\n"
                 f"⏱️ <i>Time taken: {elapsed_str}</i>"
             )
 
@@ -276,35 +276,38 @@ async def tg_monitoring_worker():
 
                 await asyncio.sleep(0.5)
 
-            # 3. Regular active monitors
+            # 3. Regular active monitors (High-Speed Concurrent Batch)
             records = database.get_all_monitors()
             active_records = [r for r in records if r.get("status") != "tracking_username"]
             if not active_records and not tracking_records:
                 await asyncio.sleep(2.0)
                 continue
 
-            for rec in active_records:
-                username = rec["username"]
-                mode = rec["mode"]
-                chat_id = rec.get("guild_id") or rec.get("channel_id")
+            sem = asyncio.Semaphore(12)
 
-                try:
-                    res = await checker.check(username)
-                    if mode == "unban" and res.status == "active":
-                        await send_tg_unban_alert(chat_id, rec, res)
-                    elif mode == "ban" and res.status == "unavailable":
-                        await send_tg_ban_alert(chat_id, rec)
-                    elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-                        await send_tg_tick_alert(chat_id, rec, res)
-                except Exception as e:
-                    logging.debug(f"TG loop error checking @{username}: {e}")
+            async def process_tg_monitor(rec):
+                async with sem:
+                    username = rec["username"]
+                    mode = rec["mode"]
+                    chat_id = rec.get("guild_id") or rec.get("channel_id")
 
-                await asyncio.sleep(1.0)
+                    try:
+                        res = await checker.check(username)
+                        if mode == "unban" and res.status == "active":
+                            await send_tg_unban_alert(chat_id, rec, res)
+                        elif mode == "ban" and res.status == "unavailable":
+                            await send_tg_ban_alert(chat_id, rec)
+                        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                            await send_tg_tick_alert(chat_id, rec, res)
+                    except Exception as e:
+                        logging.debug(f"TG loop error checking @{username}: {e}")
 
-            await asyncio.sleep(3.0)
+            await asyncio.gather(*(process_tg_monitor(r) for r in active_records))
+
+            await asyncio.sleep(2.0)
         except Exception as e:
             logging.error(f"Unexpected error in TG monitor worker: {e}")
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
 
 # --- BOT COMMAND HANDLERS (ENGLISH) ---
 

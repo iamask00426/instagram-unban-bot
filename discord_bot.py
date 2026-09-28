@@ -176,14 +176,14 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
         follg_val = str(result.following).replace(",", "") if result.following is not None else "0"
         content = (
             f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-            f"*Followers: {folls_val} | Following: {follg_val}*\n"
+            f"Followers: {folls_val} | Following: {follg_val}\n"
             f"⏱️ *Time taken: {elapsed_str}*"
         )
         if style == 4:
             content = (
                 f"⚰️ **BACK FROM THE GRAVE!** 🧟‍♂️\n"
                 f"Account Recovered | [@{raw_user}](https://instagram.com/{raw_user}) 🏆✅\n"
-                f"*Followers: {folls_val} | Following: {follg_val}*\n"
+                f"Followers: {folls_val} | Following: {follg_val}\n"
                 f"⏱️ *Time taken: {elapsed_str}*"
             )
 
@@ -469,39 +469,42 @@ async def monitoring_worker():
 
                 await asyncio.sleep(0.5)
 
-            # 3. Regular active unban/ban/tick monitors
+            # 3. Regular active unban/ban/tick monitors (High-Speed Concurrent Batch)
             records = database.get_all_monitors()
             active_records = [r for r in records if r.get("status") != "tracking_username"]
             if not active_records and not tracking_records:
                 await asyncio.sleep(2.0)
                 continue
 
-            for rec in active_records:
-                if bot.is_closed():
-                    break
-                username = rec["username"]
-                mode = rec["mode"]
-                guild_id = rec["guild_id"]
-                guild = bot.get_guild(guild_id)
+            sem = asyncio.Semaphore(12)
 
-                try:
-                    res = await checker.check(username)
-                    if mode == "unban" and res.status == "active":
-                        await send_unban_alert(guild, rec, res)
-                    elif mode == "ban" and res.status == "unavailable":
-                        await send_ban_alert(guild, rec)
-                    elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-                        await send_tick_alert(guild, rec, res)
-                except Exception as e:
-                    logging.debug(f"Error checking @{username}: {e}")
+            async def process_active_monitor(rec):
+                async with sem:
+                    if bot.is_closed():
+                        return
+                    username = rec["username"]
+                    mode = rec["mode"]
+                    guild_id = rec["guild_id"]
+                    guild = bot.get_guild(guild_id)
 
-                await asyncio.sleep(1.0)
+                    try:
+                        res = await checker.check(username)
+                        if mode == "unban" and res.status == "active":
+                            await send_unban_alert(guild, rec, res)
+                        elif mode == "ban" and res.status == "unavailable":
+                            await send_ban_alert(guild, rec)
+                        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                            await send_tick_alert(guild, rec, res)
+                    except Exception as e:
+                        logging.debug(f"Error checking @{username}: {e}")
 
-            await asyncio.sleep(3.0)
+            await asyncio.gather(*(process_active_monitor(r) for r in active_records))
+
+            await asyncio.sleep(2.0)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
 
 # --- BOT COMMANDS ---
 

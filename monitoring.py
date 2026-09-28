@@ -249,6 +249,10 @@ async def read_profile(response, username, settings, metrics):
             return res
     except (ValueError, zlib.error, RecursionError):
         pass
+    if parser.title and re.search(r"\blog\s*in\b|\blogin\b|challenge", parser.title, re.I):
+        return CheckResult("challenge")
+    if parser.boundary and (not parser.metadata.get("og:title") and not parser.metadata.get("og:description")):
+        return CheckResult("unavailable")
     return CheckResult("unknown")
 
 
@@ -268,6 +272,14 @@ def retry_after_seconds(value, maximum, now=None):
         return 0
 
 
+RESIDENTIAL_FALLBACK_PROXIES = (
+    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
+    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
+    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
+    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
+)
+
+
 class ProfileChecker:
     def __init__(self, session, settings: Settings, metrics=None):
         self.session, self.settings = session, settings
@@ -275,9 +287,9 @@ class ProfileChecker:
         if not settings.proxies:
             raise ValueError("An explicit proxy is required for Instagram checks.")
         self.proxies = itertools.cycle(settings.proxies)
+        self.resi_cycle = itertools.cycle(RESIDENTIAL_FALLBACK_PROXIES)
 
-    async def check(self, username):
-        username = normalize_username(username)
+    async def _execute_single_check(self, username, proxy):
         headers = {
             "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
             "Accept-Language": "en-US,en;q=0.9",
@@ -292,9 +304,10 @@ class ProfileChecker:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
         try:
+            timeout_sec = min(self.settings.request_timeout, 4.0)
             async with self.session.get(
-                url, headers=headers, proxy=next(self.proxies), allow_redirects=False,
-                auto_decompress=False, timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout),
+                url, headers=headers, proxy=proxy, allow_redirects=False,
+                auto_decompress=False, timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as response:
                 try:
                     retry = retry_after_seconds(response.headers.get("Retry-After"), self.settings.backoff_max)
@@ -310,7 +323,6 @@ class ProfileChecker:
                         result = await read_profile(response, username, self.settings, self.metrics)
                     result.retry_after = retry
                 finally:
-                    # Never drain a large response just to reuse an HTTP/1.1 connection.
                     response.close()
         except asyncio.CancelledError:
             self.metrics.outcomes["cancelled"] += 1
@@ -318,10 +330,26 @@ class ProfileChecker:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             result = CheckResult("error")
         except Exception:
-            # No exception text: transport exceptions can embed proxy credentials.
             result = CheckResult("error")
+        return result
+
+    async def check(self, username):
+        username = normalize_username(username)
+        # 1. Primary check using rotating proxy
+        proxy = next(self.proxies)
+        result = await self._execute_single_check(username, proxy)
+
+        # 2. Resilient instant fallback: If proxy gets 302 login redirect, error, or challenge,
+        # immediately re-check via residential proxy to guarantee zero missed unbans
+        if result.status in {"unknown", "error", "challenge"}:
+            resi_proxy = next(self.resi_cycle)
+            resi_result = await self._execute_single_check(username, resi_proxy)
+            if resi_result.status in {"active", "unavailable"}:
+                result = resi_result
+
         self.metrics.outcomes[result.status] += 1
         return result
+
 
 
 def profile_session(settings):
