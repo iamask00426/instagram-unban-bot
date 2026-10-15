@@ -490,6 +490,20 @@ async def monitoring_worker():
                     try:
                         res = await checker.check(username)
                         if mode == "unban" and res.status == "active":
+                            if not res.followers or res.followers == "?":
+                                prof_data = await resolve_instagram_profile_data(username, checker)
+                                if prof_data.get("followers"):
+                                    res.followers = prof_data["followers"]
+                                if prof_data.get("following"):
+                                    res.following = prof_data["following"]
+                                if prof_data.get("posts"):
+                                    res.posts = prof_data["posts"]
+                                if prof_data.get("pic_url"):
+                                    res.pic_url = prof_data["pic_url"]
+                                if prof_data.get("full_name"):
+                                    res.full_name = prof_data["full_name"]
+                                if prof_data.get("user_id"):
+                                    res.user_id = prof_data["user_id"]
                             await send_unban_alert(guild, rec, res)
                         elif mode == "ban" and res.status == "unavailable":
                             await send_ban_alert(guild, rec)
@@ -690,6 +704,7 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
         "pic_url": None,
         "posts": "0",
         "following": "0",
+        "followers": "0",
         "full_name": username,
         "user_id": None,
         "is_verified": False,
@@ -722,6 +737,7 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
                                     desc_val = tag[d_idx + 9:].split('"')[0]
                                     m_desc = re.search(r'([0-9.,kmb]+)\s+Followers,\s*([0-9.,kmb]+)\s+Following,\s*([0-9.,kmb]+)\s+Posts', desc_val, re.I)
                                     if m_desc:
+                                        data["followers"] = m_desc.group(1)
                                         data["following"] = m_desc.group(2)
                                         data["posts"] = m_desc.group(3)
 

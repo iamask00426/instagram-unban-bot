@@ -333,19 +333,46 @@ class ProfileChecker:
             result = CheckResult("error")
         return result
 
+    async def _execute_embed_check(self, username, proxy):
+        url = f"https://www.instagram.com/{username}/embed/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            async with self.session.get(
+                url, headers=headers, proxy=proxy, allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=3.5)
+            ) as response:
+                if response.status == 200:
+                    text = await response.text()
+                    if '"Profile"' in text and '"IntlCompactDecimalNumberFormatConfig"' in text:
+                        return CheckResult("active", username=username)
+                    else:
+                        return CheckResult("unavailable", username=username)
+                elif response.status == 404:
+                    return CheckResult("unavailable", username=username)
+        except Exception:
+            pass
+        return CheckResult("unknown")
+
     async def check(self, username):
         username = normalize_username(username)
-        # 1. Primary check using rotating proxy
         proxy = next(self.proxies)
         result = await self._execute_single_check(username, proxy)
 
-        # 2. Resilient instant fallback: If proxy gets 302 login redirect, error, or challenge,
-        # immediately re-check via residential proxy to guarantee zero missed unbans
-        if result.status in {"unknown", "error", "challenge"}:
-            resi_proxy = next(self.resi_cycle)
-            resi_result = await self._execute_single_check(username, resi_proxy)
-            if resi_result.status in {"active", "unavailable"}:
-                result = resi_result
+        # If active: return immediately!
+        if result.status == "active":
+            self.metrics.outcomes[result.status] += 1
+            return result
+
+        # Instant bypass: If standard profile request returned 302 redirect/challenge/error,
+        # embed/ endpoint never redirects to login and detects active vs unavailable in ~0.2s!
+        if result.status in {"unknown", "challenge", "error"}:
+            embed_res = await self._execute_embed_check(username, proxy)
+            if embed_res.status in {"active", "unavailable"}:
+                result = embed_res
 
         self.metrics.outcomes[result.status] += 1
         return result
