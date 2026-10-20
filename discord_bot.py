@@ -491,19 +491,22 @@ async def monitoring_worker():
                         res = await checker.check(username)
                         if mode == "unban" and res.status == "active":
                             if not res.followers or res.followers == "?":
-                                prof_data = await resolve_instagram_profile_data(username, checker)
-                                if prof_data.get("followers"):
-                                    res.followers = prof_data["followers"]
-                                if prof_data.get("following"):
-                                    res.following = prof_data["following"]
-                                if prof_data.get("posts"):
-                                    res.posts = prof_data["posts"]
-                                if prof_data.get("pic_url"):
-                                    res.pic_url = prof_data["pic_url"]
-                                if prof_data.get("full_name"):
-                                    res.full_name = prof_data["full_name"]
-                                if prof_data.get("user_id"):
-                                    res.user_id = prof_data["user_id"]
+                                try:
+                                    prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=1.8)
+                                    if prof_data.get("followers"):
+                                        res.followers = prof_data["followers"]
+                                    if prof_data.get("following"):
+                                        res.following = prof_data["following"]
+                                    if prof_data.get("posts"):
+                                        res.posts = prof_data["posts"]
+                                    if prof_data.get("pic_url"):
+                                        res.pic_url = prof_data["pic_url"]
+                                    if prof_data.get("full_name"):
+                                        res.full_name = prof_data["full_name"]
+                                    if prof_data.get("user_id"):
+                                        res.user_id = prof_data["user_id"]
+                                except Exception:
+                                    pass
                             await send_unban_alert(guild, rec, res)
                         elif mode == "ban" and res.status == "unavailable":
                             await send_ban_alert(guild, rec)
@@ -514,7 +517,7 @@ async def monitoring_worker():
 
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
 
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.05)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
@@ -717,43 +720,48 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    for res_p in RESIDENTIAL_PROXIES:
+    async def _fetch_res_profile(res_p):
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.5)) as s:
                 async with s.get(f"https://www.instagram.com/{target_clean}/", headers=m_headers, proxy=res_p, allow_redirects=False) as r:
                     if r.status == 200:
-                        html_text = await r.text()
-                        for tag in html_text.split(">"):
-                            if "og:image" in tag and "content=" in tag:
-                                c_idx = tag.find('content="')
-                                if c_idx != -1:
-                                    pic = tag[c_idx + 9:].split('"')[0].replace("&amp;", "&")
-                                    if pic.startswith("http"):
-                                        data["pic_url"] = pic
+                        return await r.text()
+        except Exception:
+            return None
 
-                            if "og:description" in tag and "content=" in tag:
-                                d_idx = tag.find('content="')
-                                if d_idx != -1:
-                                    desc_val = tag[d_idx + 9:].split('"')[0]
-                                    m_desc = re.search(r'([0-9.,kmb]+)\s+Followers,\s*([0-9.,kmb]+)\s+Following,\s*([0-9.,kmb]+)\s+Posts', desc_val, re.I)
-                                    if m_desc:
-                                        data["followers"] = m_desc.group(1)
-                                        data["following"] = m_desc.group(2)
-                                        data["posts"] = m_desc.group(3)
+    tasks = [_fetch_res_profile(p) for p in RESIDENTIAL_PROXIES]
+    for coro in asyncio.as_completed(tasks):
+        html_text = await coro
+        if html_text:
+            for tag in html_text.split(">"):
+                if "og:image" in tag and "content=" in tag:
+                    c_idx = tag.find('content="')
+                    if c_idx != -1:
+                        pic = tag[c_idx + 9:].split('"')[0].replace("&amp;", "&")
+                        if pic.startswith("http"):
+                            data["pic_url"] = pic
 
-                            if "og:title" in tag and "content=" in tag:
-                                t_idx = tag.find('content="')
-                                if t_idx != -1:
-                                    title_val = tag[t_idx + 9:].split('"')[0].replace("&amp;", "&")
-                                    name_part = re.sub(r'\(@[^\)]+\).*', '', title_val).strip()
-                                    if name_part:
-                                        data["full_name"] = name_part
+                if "og:description" in tag and "content=" in tag:
+                    d_idx = tag.find('content="')
+                    if d_idx != -1:
+                        desc_val = tag[d_idx + 9:].split('"')[0]
+                        m_desc = re.search(r'([0-9.,kmb]+)\s+Followers,\s*([0-9.,kmb]+)\s+Following,\s*([0-9.,kmb]+)\s+Posts', desc_val, re.I)
+                        if m_desc:
+                            data["followers"] = m_desc.group(1)
+                            data["following"] = m_desc.group(2)
+                            data["posts"] = m_desc.group(3)
 
-                        if data["pic_url"]:
-                            logging.info(f"Resolved live profile for @{target_clean} via residential proxy: DP={bool(data['pic_url'])}, posts={data['posts']}, following={data['following']}")
-                            return data
-        except Exception as e:
-            logging.debug(f"Residential HTML check error on {res_p}: {e}")
+                if "og:title" in tag and "content=" in tag:
+                    t_idx = tag.find('content="')
+                    if t_idx != -1:
+                        title_val = tag[t_idx + 9:].split('"')[0].replace("&amp;", "&")
+                        name_part = re.sub(r'\(@[^\)]+\).*', '', title_val).strip()
+                        if name_part:
+                            data["full_name"] = name_part
+
+            if data["pic_url"]:
+                logging.info(f"Resolved live profile for @{target_clean} via residential proxy: DP={bool(data['pic_url'])}, posts={data['posts']}, following={data['following']}")
+                return data
 
     # 2. Try checker if residential scrape was inconclusive
     if checker:
@@ -1152,11 +1160,6 @@ async def on_command_error(ctx, error):
         logging.error(f"Command error in {ctx.command}: {error}")
 
 async def main():
-    if any(os.getenv(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID")):
-        logging.info("Railway environment detected. Discord bot running on Contabo VPS. Exiting to avoid duplicates.")
-        await asyncio.sleep(3600)
-        return
-
     global checker, profile_http_session
     database.init_db()
 

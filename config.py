@@ -127,11 +127,10 @@ class Settings:
         if is_example(token) or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
             raise ValueError("Set BOT_TOKEN to an explicit valid Telegram bot token.")
         raw_proxies = env.get("PROXIES", "").strip()
-        if not raw_proxies:
-            raise ValueError("Set PROXIES explicitly; direct Instagram fallback is disabled.")
-        proxies = tuple(parse_proxy_entry(p) for p in re.split(r"[,;\r\n]+", raw_proxies) if p.strip())
-        if not proxies:
-            raise ValueError("Set at least one HTTP(S) proxy in PROXIES.")
+        if raw_proxies:
+            proxies = tuple(parse_proxy_entry(p) for p in re.split(r"[,;\r\n]+", raw_proxies) if p.strip())
+        else:
+            proxies = ()
         mode = env.get("IG_CHECK_MODE", "html").strip().lower()
         if mode not in {"html", "json"}:
             raise ValueError("IG_CHECK_MODE must be html or json.")

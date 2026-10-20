@@ -59,7 +59,7 @@ async def download_avatar(url, proxy=None):
         try:
             async with aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(limit=1, resolver=resolver),
-                timeout=aiohttp.ClientTimeout(total=8),
+                timeout=aiohttp.ClientTimeout(total=2.0),
                 cookie_jar=aiohttp.DummyCookieJar(),
                 trust_env=False,
                 auto_decompress=True,

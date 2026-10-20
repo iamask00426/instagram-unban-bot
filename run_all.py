@@ -10,11 +10,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def main():
-    if any(os.getenv(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_DEPLOYMENT_ID")):
-        logging.info("Railway environment detected. Bots are active on Contabo VPS. Exiting to avoid duplicates.")
-        time.sleep(3600)
-        sys.exit(0)
-
     procs = []
 
     # 1. Telegram Bot

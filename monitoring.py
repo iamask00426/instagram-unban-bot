@@ -272,22 +272,11 @@ def retry_after_seconds(value, maximum, now=None):
         return 0
 
 
-RESIDENTIAL_FALLBACK_PROXIES = (
-    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
-    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
-    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
-    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
-)
-
-
 class ProfileChecker:
     def __init__(self, session, settings: Settings, metrics=None):
         self.session, self.settings = session, settings
         self.metrics = metrics if metrics is not None else Metrics()
-        if not settings.proxies:
-            raise ValueError("An explicit proxy is required for Instagram checks.")
-        self.proxies = itertools.cycle(settings.proxies)
-        self.resi_cycle = itertools.cycle(RESIDENTIAL_FALLBACK_PROXIES)
+        self.proxies = itertools.cycle(settings.proxies) if settings.proxies else None
 
     async def _execute_single_check(self, username, proxy):
         headers = {
@@ -304,7 +293,7 @@ class ProfileChecker:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
         try:
-            timeout_sec = min(self.settings.request_timeout, 4.0)
+            timeout_sec = 3.0
             async with self.session.get(
                 url, headers=headers, proxy=proxy, allow_redirects=False,
                 auto_decompress=False, timeout=aiohttp.ClientTimeout(total=timeout_sec),
@@ -333,46 +322,35 @@ class ProfileChecker:
             result = CheckResult("error")
         return result
 
-    async def _execute_embed_check(self, username, proxy):
-        url = f"https://www.instagram.com/{username}/embed/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        try:
-            async with self.session.get(
-                url, headers=headers, proxy=proxy, allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=3.5)
-            ) as response:
-                if response.status == 200:
-                    text = await response.text()
-                    if '"Profile"' in text and '"IntlCompactDecimalNumberFormatConfig"' in text:
-                        return CheckResult("active", username=username)
-                    else:
-                        return CheckResult("unavailable", username=username)
-                elif response.status == 404:
-                    return CheckResult("unavailable", username=username)
-        except Exception:
-            pass
-        return CheckResult("unknown")
-
     async def check(self, username):
         username = normalize_username(username)
-        proxy = next(self.proxies)
-        result = await self._execute_single_check(username, proxy)
-
-        # If active: return immediately!
-        if result.status == "active":
-            self.metrics.outcomes[result.status] += 1
-            return result
-
-        # Instant bypass: If standard profile request returned 302 redirect/challenge/error,
-        # embed/ endpoint never redirects to login and detects active vs unavailable in ~0.2s!
-        if result.status in {"unknown", "challenge", "error"}:
-            embed_res = await self._execute_embed_check(username, proxy)
-            if embed_res.status in {"active", "unavailable"}:
-                result = embed_res
+        if self.proxies:
+            proxies = [next(self.proxies) for _ in range(min(3, len(self.settings.proxies)))]
+            tasks = [
+                asyncio.create_task(self._execute_single_check(username, p))
+                for p in proxies
+            ]
+            result = None
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                if res.status not in {"error", "unknown"}:
+                    result = res
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    break
+            if result is None:
+                for t in tasks:
+                    if t.done() and not t.cancelled():
+                        try:
+                            result = t.result()
+                        except Exception:
+                            pass
+                if result is None:
+                    result = CheckResult("unknown")
+        else:
+            # Direct connection without proxy (ultra-fast 0.1s on Railway)
+            result = await self._execute_single_check(username, None)
 
         self.metrics.outcomes[result.status] += 1
         return result
