@@ -27,7 +27,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip().strip('"').strip("'")
 
 intents = discord.Intents.default()
 intents.message_content = True
