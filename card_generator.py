@@ -260,7 +260,11 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
     fgw = draw.textlength(follg_str, font=font_stats_num) if hasattr(draw, 'textlength') else len(follg_str)*16
     draw.text((follg_x + fgw + 8, st_lbl_y), 'following', font=font_stats_lbl, fill='#a8a8a8')
 
-    sub_title = (full_name if full_name else username) if not is_unavailable else "UserNotFound"
+    import html as py_html, re as py_re
+    raw_sub = (full_name if full_name else username) if not is_unavailable else "UserNotFound"
+    sub_title = py_re.sub(r'[\(\[\{]?(@|&#064;)[^\)\]\}]+[\)\]\}]?.*', '', py_html.unescape(raw_sub)).strip()
+    if not sub_title:
+        sub_title = username if not is_unavailable else "UserNotFound"
     name_y = 265
     max_name_w = width - uname_x - 30
     cur_name_size = 24

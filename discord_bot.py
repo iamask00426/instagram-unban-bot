@@ -754,7 +754,8 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
                 if "og:title" in tag and "content=" in tag:
                     t_idx = tag.find('content="')
                     if t_idx != -1:
-                        title_val = tag[t_idx + 9:].split('"')[0].replace("&amp;", "&")
+                        import html as py_html
+                        title_val = py_html.unescape(tag[t_idx + 9:].split('"')[0])
                         name_part = re.sub(r'\(@[^\)]+\).*', '', title_val).strip()
                         if name_part:
                             data["full_name"] = name_part
