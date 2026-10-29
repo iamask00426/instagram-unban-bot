@@ -25,7 +25,8 @@ def main():
     if dc_token:
         os.environ["DISCORD_BOT_TOKEN"] = dc_token
 
-    has_tg = bool(tg_token and not tg_token.startswith("your_"))
+    import re
+    has_tg = bool(tg_token and not tg_token.startswith("your_") and re.match(r"^\d+:[A-Za-z0-9_-]{20,}$", tg_token))
     has_dc = bool(dc_token and not dc_token.startswith("your_"))
 
     logging.info(f"Environment check -> BOT_TOKEN: {'Configured (' + str(len(tg_token)) + ' chars)' if has_tg else 'Missing/Placeholder'}, DISCORD_BOT_TOKEN: {'Configured (' + str(len(dc_token)) + ' chars)' if has_dc else 'Missing/Placeholder'}")
