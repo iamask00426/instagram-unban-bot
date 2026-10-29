@@ -307,7 +307,8 @@ class ProfileChecker:
                     elif 300 <= response.status < 400:
                         result = CheckResult("unknown")
                     elif response.status != 200:
-                        result = CheckResult("error")
+                        logging.warning(f"Profile check HTTP status {response.status} for @{username} via {proxy}")
+                        result = CheckResult(f"HTTP_{response.status}")
                     else:
                         result = await read_profile(response, username, self.settings, self.metrics)
                     result.retry_after = retry
@@ -316,10 +317,9 @@ class ProfileChecker:
         except asyncio.CancelledError:
             self.metrics.outcomes["cancelled"] += 1
             raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-            result = CheckResult("error")
-        except Exception:
-            result = CheckResult("error")
+        except Exception as e:
+            logging.warning(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
+            result = CheckResult(f"error_{type(e).__name__}")
         return result
 
     async def check(self, username):
@@ -333,21 +333,19 @@ class ProfileChecker:
             result = None
             for coro in asyncio.as_completed(tasks):
                 res = await coro
-                if res.status not in {"error", "unknown"}:
+                if res.status not in {"error", "unknown"} and not res.status.startswith("error") and not res.status.startswith("HTTP_"):
                     result = res
                     for t in tasks:
                         if not t.done():
                             t.cancel()
                     break
-            if result is None:
-                for t in tasks:
-                    if t.done() and not t.cancelled():
-                        try:
-                            result = t.result()
-                        except Exception:
-                            pass
-                if result is None:
-                    result = CheckResult("unknown")
+            if result is None or result.status.startswith("error"):
+                # If proxies failed, fallback to direct connection
+                direct_res = await self._execute_single_check(username, None)
+                if direct_res.status in {"active", "unavailable"}:
+                    result = direct_res
+                elif result is None:
+                    result = direct_res
         else:
             # Direct connection without proxy (ultra-fast 0.1s on Railway)
             result = await self._execute_single_check(username, None)
@@ -358,8 +356,17 @@ class ProfileChecker:
 
 
 def profile_session(settings):
+    import ssl
+    try:
+        import certifi
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
     session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=settings.concurrency, limit_per_host=settings.concurrency),
+        connector=aiohttp.TCPConnector(limit=settings.concurrency, limit_per_host=settings.concurrency, ssl=ssl_ctx),
         cookie_jar=aiohttp.DummyCookieJar(), trust_env=False, auto_decompress=False,
         timeout=aiohttp.ClientTimeout(total=settings.request_timeout), read_bufsize=4096,
     )
