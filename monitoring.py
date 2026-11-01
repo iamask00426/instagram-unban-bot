@@ -325,29 +325,34 @@ class ProfileChecker:
     async def check(self, username):
         username = normalize_username(username)
         if self.proxies:
-            proxies = [next(self.proxies) for _ in range(min(3, len(self.settings.proxies)))]
+            # Race up to 4 proxies concurrently
+            proxies_to_race = [next(self.proxies) for _ in range(min(4, len(self.settings.proxies)))]
             tasks = [
                 asyncio.create_task(self._execute_single_check(username, p))
-                for p in proxies
+                for p in proxies_to_race
             ]
             result = None
             for coro in asyncio.as_completed(tasks):
                 res = await coro
-                if res.status not in {"error", "unknown"} and not res.status.startswith("error") and not res.status.startswith("HTTP_"):
+                # ONLY consider active or unavailable as a definitive answer
+                # (429 challenge / 302 unknown means that proxy was blocked/rate-limited)
+                if res.status in {"active", "unavailable"}:
                     result = res
                     for t in tasks:
                         if not t.done():
                             t.cancel()
                     break
-            if result is None or result.status.startswith("error"):
-                # If proxies failed, fallback to direct connection
+            
+            # If all raced proxies were rate-limited (429) or blocked (302), try direct connection
+            if result is None:
                 direct_res = await self._execute_single_check(username, None)
                 if direct_res.status in {"active", "unavailable"}:
                     result = direct_res
-                elif result is None:
-                    result = direct_res
+                else:
+                    # If direct also didn't get active/unavailable, take the best result
+                    result = direct_res if direct_res else CheckResult("unknown")
         else:
-            # Direct connection without proxy (ultra-fast 0.1s on Railway)
+            # Direct connection without proxy (ultra-fast ~0.2s on clean cloud IP)
             result = await self._execute_single_check(username, None)
 
         self.metrics.outcomes[result.status] += 1

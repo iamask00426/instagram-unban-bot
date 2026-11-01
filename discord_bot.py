@@ -729,7 +729,7 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
         except Exception:
             return None
 
-    tasks = [_fetch_res_profile(p) for p in RESIDENTIAL_PROXIES]
+    tasks = [_fetch_res_profile(p) for p in [None] + RESIDENTIAL_PROXIES]
     for coro in asyncio.as_completed(tasks):
         html_text = await coro
         if html_text:

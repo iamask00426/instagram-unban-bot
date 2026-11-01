@@ -106,6 +106,8 @@ def add_monitors(usernames: list[str], mode: str, guild_id: int, channel_id: int
                     mode = excluded.mode,
                     channel_id = excluded.channel_id,
                     added_by = excluded.added_by,
+                    status = 'monitoring',
+                    unbanned_at = NULL,
                     created_at = excluded.created_at
             """, (key, clean, mode, guild_id, channel_id, added_by, now))
             added.append(clean)
