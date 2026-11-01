@@ -415,22 +415,25 @@ async def send_username_change_alert(guild: discord.Guild, monitor_data: dict, o
     guild_id = monitor_data.get("guild_id", 0)
     asyncio.create_task(forward_alert_if_configured(guild_id, content))
 
+_instant_check_sem = asyncio.Semaphore(6)
+
 async def instant_check(guild: discord.Guild, monitor_data: dict):
     """Executes immediate verification within 1-2s of command."""
     if not checker:
         return
     username = monitor_data["username"]
     mode = monitor_data["mode"]
-    try:
-        res = await checker.check(username)
-        if mode == "unban" and res.status == "active":
-            await send_unban_alert(guild, monitor_data, res)
-        elif mode == "ban" and res.status == "unavailable":
-            await send_ban_alert(guild, monitor_data)
-        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-            await send_tick_alert(guild, monitor_data, res)
-    except Exception as e:
-        logging.debug(f"Instant check exception for @{username}: {e}")
+    async with _instant_check_sem:
+        try:
+            res = await checker.check(username)
+            if mode == "unban" and res.status == "active":
+                await send_unban_alert(guild, monitor_data, res)
+            elif mode == "ban" and res.status == "unavailable":
+                await send_ban_alert(guild, monitor_data)
+            elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                await send_tick_alert(guild, monitor_data, res)
+        except Exception as e:
+            logging.debug(f"Instant check exception for @{username}: {e}")
 
 async def monitoring_worker():
     """Background monitoring loop that continuously cycles through stored accounts."""

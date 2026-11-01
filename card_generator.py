@@ -279,5 +279,6 @@ async def create_profile_card(username, followers, posts, following, pic_url=Non
 
     bio = BytesIO()
     img.save(bio, 'PNG')
+    img.close()
     bio.seek(0)
     return bio

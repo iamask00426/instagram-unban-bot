@@ -5,13 +5,16 @@ from datetime import datetime
 DB_PATH = os.getenv("SQLITE_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitors.db"))
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA synchronous = NORMAL")
         cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'")
         row = cursor.fetchone()
         if row and ("'tick'" not in row[0] or "PRIMARY KEY (username, guild_id)" not in row[0]):
