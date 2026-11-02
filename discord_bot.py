@@ -537,6 +537,14 @@ async def on_ready():
     tracking_count = len([r for r in all_monitors if r.get("status") == "tracking_username"])
     logging.info(f"Database loaded [{database.DB_PATH}]: Resumed {active_count} active monitors, {tracking_count} in 24h name watch (Total: {len(all_monitors)})")
 
+@bot.event
+async def on_disconnect():
+    logging.warning("⚠️ Discord WebSocket disconnected. Attempting to reconnect...")
+
+@bot.event
+async def on_resumed():
+    logging.info("✅ Discord session resumed successfully. Monitoring continues.")
+
 @bot.command(name="backup", aliases=["export"])
 async def backup_command(ctx):
     """Exports all currently monitored accounts."""
@@ -1224,7 +1232,36 @@ async def main():
             await profile_http_session.close()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    import signal
+
+    def _handle_signal(signum, frame):
+        logging.info(f"Received signal {signum}, shutting down gracefully.")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    RECONNECT_DELAY = 10  # seconds before retrying after a crash
+    MAX_RECONNECT_DELAY = 120
+
+    reconnect_delay = RECONNECT_DELAY
+    while True:
+        try:
+            logging.info("Starting bot process...")
+            asyncio.run(main())
+            # If main() returns cleanly (e.g., SIGTERM / logout), stop retrying
+            logging.info("Bot main() returned cleanly. Exiting.")
+            break
+        except SystemExit:
+            logging.info("Clean shutdown requested. Exiting.")
+            break
+        except KeyboardInterrupt:
+            logging.info("KeyboardInterrupt received. Exiting.")
+            break
+        except discord.errors.LoginFailure as e:
+            logging.critical(f"FATAL: Invalid Discord token — {e}. Not retrying.")
+            break
+        except Exception as e:
+            logging.error(f"Bot crashed with unhandled exception: {type(e).__name__}: {e}. Restarting in {reconnect_delay}s...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
