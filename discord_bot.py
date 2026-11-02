@@ -532,6 +532,38 @@ async def monitoring_worker():
 async def on_ready():
     logging.info(f"Logged in as {bot.user.name} ({bot.user.id})")
     database.init_db()
+    all_monitors = database.get_all_monitors()
+    active_count = len([r for r in all_monitors if r.get("status") != "tracking_username"])
+    tracking_count = len([r for r in all_monitors if r.get("status") == "tracking_username"])
+    logging.info(f"Database loaded [{database.DB_PATH}]: Resumed {active_count} active monitors, {tracking_count} in 24h name watch (Total: {len(all_monitors)})")
+
+@bot.command(name="backup", aliases=["export"])
+async def backup_command(ctx):
+    """Exports all currently monitored accounts."""
+    records = database.get_all_monitors()
+    if ctx.guild:
+        records = [r for r in records if r["guild_id"] == ctx.guild.id]
+    if not records:
+        return await ctx.send("ℹ️ No active monitors found to backup.")
+
+    unban_list = [f"@{r['raw_username']}" for r in records if r.get("mode") == "unban"]
+    ban_list = [f"@{r['raw_username']}" for r in records if r.get("mode") == "ban"]
+    tick_list = [f"@{r['raw_username']}" for r in records if r.get("mode") == "tick"]
+
+    msg = f"📦 **Monitor Database Backup** ({len(records)} total)\n"
+    if unban_list:
+        msg += f"\n**Unban Monitors ({len(unban_list)}):**\n`{' '.join(unban_list)}`\n"
+    if ban_list:
+        msg += f"\n**Ban Monitors ({len(ban_list)}):**\n`{' '.join(ban_list)}`\n"
+    if tick_list:
+        msg += f"\n**Tick Monitors ({len(tick_list)}):**\n`{' '.join(tick_list)}`\n"
+
+    if len(msg) > 1950:
+        import io
+        buf = io.BytesIO(msg.encode("utf-8"))
+        await ctx.send("📦 Database backup file:", file=discord.File(buf, filename="monitors_backup.txt"))
+    else:
+        await ctx.send(msg)
 
 @bot.command(name="unban", aliases=["bulk", "monitor"])
 async def unban_command(ctx, *, raw_input: str = None):

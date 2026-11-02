@@ -1,8 +1,40 @@
 import sqlite3
 import os
+import shutil
+import logging
 from datetime import datetime
 
-DB_PATH = os.getenv("SQLITE_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitors.db"))
+def resolve_db_path() -> str:
+    # 1. Explicit environment variable if provided
+    env_path = os.getenv("SQLITE_DB_PATH")
+    if env_path:
+        d = os.path.dirname(os.path.abspath(env_path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        return env_path
+
+    # 2. Check for standard Railway Persistent Volume mount directories
+    candidate_dirs = ["/data", "/app/data", "/mnt/data"]
+    default_local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitors.db")
+
+    for c_dir in candidate_dirs:
+        try:
+            if os.path.exists(c_dir) and os.access(c_dir, os.W_OK):
+                target = os.path.join(c_dir, "monitors.db")
+                # Auto-migrate existing local DB file into persistent volume so no data is lost
+                if os.path.exists(default_local) and not os.path.exists(target):
+                    try:
+                        shutil.copy2(default_local, target)
+                        logging.info(f"Auto-migrated database from {default_local} to persistent volume at {target}")
+                    except Exception as e:
+                        logging.warning(f"Could not copy local DB to volume: {e}")
+                return target
+        except Exception:
+            pass
+
+    return default_local
+
+DB_PATH = resolve_db_path()
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
