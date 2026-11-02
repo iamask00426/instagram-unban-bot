@@ -104,13 +104,16 @@ def _number(env, key, default, low, high, integer=False):
         raise ValueError(f"{key} must be between {low} and {high}.") from None
 
 
-BUILTIN_PROXIES = (
+RESIDENTIAL_PROXIES = (
     # Webshare Static Residential Proxies (99.8% Success Rate)
     "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
     "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
     "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
     "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
     "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194",
+)
+
+BUILTIN_PROXIES = RESIDENTIAL_PROXIES + (
     # Webshare Proxy Server Shared Proxies
     "http://huezajaf:0lsun8mr921c@185.171.254.141:6173",
     "http://huezajaf:0lsun8mr921c@185.226.205.139:5671",
@@ -157,8 +160,15 @@ class Settings:
         if download_url:
             try:
                 import urllib.request
+                import ssl
                 req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                try:
+                    ctx = ssl.create_default_context()
+                    resp_cm = urllib.request.urlopen(req, timeout=10, context=ctx)
+                except Exception:
+                    unverified_ctx = ssl._create_unverified_context()
+                    resp_cm = urllib.request.urlopen(req, timeout=10, context=unverified_ctx)
+                with resp_cm as resp:
                     text = resp.read().decode("utf-8", errors="ignore")
                     for line in text.splitlines():
                         line = line.strip()
@@ -170,6 +180,9 @@ class Settings:
             except Exception as e:
                 import logging
                 logging.warning(f"Error downloading proxies from Webshare: {e}")
+            else:
+                import logging
+                logging.info(f"Downloaded {len(parsed_proxies)} proxies from Webshare URL.")
 
         if raw_proxies:
             for p in re.split(r"[,;\r\n]+", raw_proxies):
@@ -179,10 +192,17 @@ class Settings:
                     except Exception:
                         pass
 
+        # Ensure high-success Static Residential proxies are also blended into the pool
+        for res_p in RESIDENTIAL_PROXIES:
+            if res_p not in parsed_proxies:
+                parsed_proxies.append(res_p)
+
         if not parsed_proxies:
             parsed_proxies = list(BUILTIN_PROXIES)
 
         proxies = tuple(parsed_proxies)
+        import logging
+        logging.info(f"Active proxy pool initialized with {len(proxies)} total proxies.")
         mode = env.get("IG_CHECK_MODE", "html").strip().lower()
         if mode not in {"html", "json"}:
             raise ValueError("IG_CHECK_MODE must be html or json.")
