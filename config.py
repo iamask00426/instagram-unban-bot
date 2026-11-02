@@ -104,6 +104,27 @@ def _number(env, key, default, low, high, integer=False):
         raise ValueError(f"{key} must be between {low} and {high}.") from None
 
 
+BUILTIN_PROXIES = (
+    # Webshare Static Residential Proxies (99.8% Success Rate)
+    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
+    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
+    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
+    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
+    "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194",
+    # Webshare Proxy Server Shared Proxies
+    "http://huezajaf:0lsun8mr921c@185.171.254.141:6173",
+    "http://huezajaf:0lsun8mr921c@185.226.205.139:5671",
+    "http://huezajaf:0lsun8mr921c@82.24.238.234:7041",
+    "http://huezajaf:0lsun8mr921c@82.24.238.179:6986",
+    "http://huezajaf:0lsun8mr921c@104.239.77.166:5889",
+    "http://huezajaf:0lsun8mr921c@64.137.88.50:6289",
+    "http://huezajaf:0lsun8mr921c@107.175.55.169:7110",
+    "http://huezajaf:0lsun8mr921c@161.123.5.153:5202",
+    "http://huezajaf:0lsun8mr921c@45.115.195.235:6213",
+    "http://huezajaf:0lsun8mr921c@104.233.16.15:6279",
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -127,10 +148,41 @@ class Settings:
         if is_example(token) or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
             token = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
         raw_proxies = env.get("PROXIES", "").strip()
+        download_url = env.get("WEBSHARE_DOWNLOAD_URL", "").strip()
+        if raw_proxies.startswith("http://proxy.webshare.io") or raw_proxies.startswith("https://proxy.webshare.io"):
+            download_url = raw_proxies
+            raw_proxies = ""
+
+        parsed_proxies = []
+        if download_url:
+            try:
+                import urllib.request
+                req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    text = resp.read().decode("utf-8", errors="ignore")
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                parsed_proxies.append(parse_proxy_entry(line))
+                            except Exception:
+                                pass
+            except Exception as e:
+                import logging
+                logging.warning(f"Error downloading proxies from Webshare: {e}")
+
         if raw_proxies:
-            proxies = tuple(parse_proxy_entry(p) for p in re.split(r"[,;\r\n]+", raw_proxies) if p.strip())
-        else:
-            proxies = ()
+            for p in re.split(r"[,;\r\n]+", raw_proxies):
+                if p.strip():
+                    try:
+                        parsed_proxies.append(parse_proxy_entry(p))
+                    except Exception:
+                        pass
+
+        if not parsed_proxies:
+            parsed_proxies = list(BUILTIN_PROXIES)
+
+        proxies = tuple(parsed_proxies)
         mode = env.get("IG_CHECK_MODE", "html").strip().lower()
         if mode not in {"html", "json"}:
             raise ValueError("IG_CHECK_MODE must be html or json.")
