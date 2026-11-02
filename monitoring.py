@@ -341,10 +341,12 @@ class ProfileChecker:
                     for t in tasks:
                         if not t.done():
                             t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
                     break
-            
+
             # If all raced proxies were rate-limited (429) or blocked (302), try direct connection
             if result is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
                 direct_res = await self._execute_single_check(username, None)
                 if direct_res.status in {"active", "unavailable"}:
                     result = direct_res
@@ -370,8 +372,9 @@ def profile_session(settings):
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
+    conn_limit = max(100, settings.concurrency * 4)
     session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=settings.concurrency, limit_per_host=settings.concurrency, ssl=ssl_ctx),
+        connector=aiohttp.TCPConnector(limit=conn_limit, limit_per_host=conn_limit, ssl=ssl_ctx),
         cookie_jar=aiohttp.DummyCookieJar(), trust_env=False, auto_decompress=False,
         timeout=aiohttp.ClientTimeout(total=settings.request_timeout), read_bufsize=4096,
     )
