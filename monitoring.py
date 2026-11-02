@@ -277,6 +277,9 @@ class ProfileChecker:
         self.session, self.settings = session, settings
         self.metrics = metrics if metrics is not None else Metrics()
         self.proxies = itertools.cycle(settings.proxies) if settings.proxies else None
+        # Always keep high-reputation static residential proxies in dedicated cycle
+        from config import RESIDENTIAL_PROXIES
+        self.residential_cycle = itertools.cycle(RESIDENTIAL_PROXIES) if RESIDENTIAL_PROXIES else None
 
     async def _execute_single_check(self, username, proxy):
         headers = {
@@ -293,7 +296,7 @@ class ProfileChecker:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
         try:
-            timeout_sec = 3.0
+            timeout_sec = 2.5
             async with self.session.get(
                 url, headers=headers, proxy=proxy, allow_redirects=False,
                 auto_decompress=False, timeout=aiohttp.ClientTimeout(total=timeout_sec),
@@ -318,15 +321,24 @@ class ProfileChecker:
             self.metrics.outcomes["cancelled"] += 1
             raise
         except Exception as e:
-            logging.warning(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
+            logging.debug(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
             result = CheckResult(f"error_{type(e).__name__}")
         return result
 
     async def check(self, username):
         username = normalize_username(username)
         if self.proxies:
-            # Race up to 4 proxies concurrently
-            proxies_to_race = [next(self.proxies) for _ in range(min(4, len(self.settings.proxies)))]
+            # Race 4 proxies: guarantee at least 1-2 ultra-reliable static residential proxies in every batch!
+            proxies_to_race = []
+            if self.residential_cycle:
+                proxies_to_race.append(next(self.residential_cycle))
+                proxies_to_race.append(next(self.residential_cycle))
+            
+            while len(proxies_to_race) < min(4, len(self.settings.proxies)):
+                p = next(self.proxies)
+                if p not in proxies_to_race:
+                    proxies_to_race.append(p)
+
             tasks = [
                 asyncio.create_task(self._execute_single_check(username, p))
                 for p in proxies_to_race
@@ -335,7 +347,7 @@ class ProfileChecker:
             for coro in asyncio.as_completed(tasks):
                 res = await coro
                 # ONLY consider active or unavailable as a definitive answer
-                # (429 challenge / 302 unknown means that proxy was blocked/rate-limited)
+                # (429 challenge / timeout / 302 unknown means proxy was blocked or hung)
                 if res.status in {"active", "unavailable"}:
                     result = res
                     for t in tasks:
@@ -344,14 +356,13 @@ class ProfileChecker:
                     await asyncio.gather(*tasks, return_exceptions=True)
                     break
 
-            # If all raced proxies were rate-limited (429) or blocked (302), try direct connection
+            # If all raced proxies timed out or got 429, try direct connection as safety net
             if result is None:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 direct_res = await self._execute_single_check(username, None)
                 if direct_res.status in {"active", "unavailable"}:
                     result = direct_res
                 else:
-                    # If direct also didn't get active/unavailable, take the best result
                     result = direct_res if direct_res else CheckResult("unknown")
         else:
             # Direct connection without proxy (ultra-fast ~0.2s on clean cloud IP)
