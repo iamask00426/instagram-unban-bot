@@ -1,8 +1,0 @@
-.git
-.env
-__pycache__
-*.pyc
-venv
-monitors.db
-monitors.db-shm
-monitors.db-wal
