@@ -4,6 +4,7 @@ __pycache__/
 *.log
 .DS_Store
 monitors.db
+monitors.db-shm
+monitors.db-wal
 monitors_old
 venv/
-Roboto-Bold.ttf
