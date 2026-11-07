@@ -440,46 +440,50 @@ async def monitoring_worker():
     await bot.wait_until_ready()
     logging.info("Discord monitoring loop worker started.")
     
+    sem = asyncio.Semaphore(12)
+    last_tracking_check = 0.0
+    
     while not bot.is_closed():
         try:
+            now = time.monotonic()
+
             # 1. Clean up expired 24h username tracking accounts (> 86400s / 24h)
             expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
             for exp in expired:
                 logging.info(f"24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')}, Guild: {exp['guild_id']})")
 
-            # 2. Check 24h username tracking accounts using their user_id
-            tracking_records = database.get_username_tracking_monitors()
-            for rec in tracking_records:
-                if bot.is_closed():
-                    break
-                uid = rec.get("user_id")
-                if not uid:
-                    continue
-                old_username = rec.get("username")
-                old_raw = rec.get("raw_username")
-                guild_id = rec.get("guild_id")
-                guild = bot.get_guild(guild_id)
+            # 2. Check 24h username tracking accounts periodically (every 60s, NOT every cycle!)
+            # This prevents serial delays from blocking the primary unban monitoring pipeline.
+            if now - last_tracking_check > 60.0:
+                last_tracking_check = now
+                tracking_records = database.get_username_tracking_monitors()
+                for rec in tracking_records:
+                    if bot.is_closed():
+                        break
+                    uid = rec.get("user_id")
+                    if not uid:
+                        continue
+                    old_username = rec.get("username")
+                    old_raw = rec.get("raw_username")
+                    guild_id = rec.get("guild_id")
+                    guild = bot.get_guild(guild_id)
 
-                try:
-                    proxy = next(checker.proxies) if checker and checker.proxies else None
-                    current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
-                    if current_name and current_name.lower() != old_username.lower():
-                        logging.info(f"Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
-                        database.update_tracked_username(old_username, current_name, guild_id)
-                        await send_username_change_alert(guild, rec, old_raw, current_name, uid)
-                except Exception as e:
-                    logging.debug(f"Error checking UID {uid} for username change: {e}")
-
-                await asyncio.sleep(0.5)
+                    try:
+                        proxy = next(checker.proxies) if checker and checker.proxies else None
+                        current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
+                        if current_name and current_name.lower() != old_username.lower():
+                            logging.info(f"Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
+                            database.update_tracked_username(old_username, current_name, guild_id)
+                            await send_username_change_alert(guild, rec, old_raw, current_name, uid)
+                    except Exception as e:
+                        logging.debug(f"Error checking UID {uid} for username change: {e}")
 
             # 3. Regular active unban/ban/tick monitors (High-Speed Concurrent Batch)
             records = database.get_all_monitors()
             active_records = [r for r in records if r.get("status") != "tracking_username"]
-            if not active_records and not tracking_records:
+            if not active_records:
                 await asyncio.sleep(2.0)
                 continue
-
-            sem = asyncio.Semaphore(12)
 
             async def process_active_monitor(rec):
                 async with sem:
@@ -520,7 +524,12 @@ async def monitoring_worker():
 
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
 
-            await asyncio.sleep(0.05)
+            # Smart pause between check cycles:
+            # Gives residential proxies the breather required so Instagram RLE never flags them.
+            # 2.0s interval means 11 accounts are checked ~30 times a minute.
+            # Unban detection happens in ~2 seconds!
+            interval = getattr(settings, "check_interval", 2.0) or 2.0
+            await asyncio.sleep(max(1.5, interval))
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
