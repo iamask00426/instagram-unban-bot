@@ -524,8 +524,7 @@ async def monitoring_worker():
             loop_start = time.monotonic()
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
             elapsed = time.monotonic() - loop_start
-            interval = getattr(settings, "check_interval", 2.0) or 2.0
-            pause = max(0.0, interval - elapsed)
+            pause = max(0.0, 2.0 - elapsed)
             if pause > 0:
                 await asyncio.sleep(pause)
 
