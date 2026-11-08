@@ -362,53 +362,35 @@ class ProfileChecker:
     async def check(self, username):
         username = normalize_username(username)
         self._cleanup_cooldowns()
-        if self.proxies or self.residential_cycle or self.rotating_cycle:
-            # Race 2 healthy proxies:
-            # 1 Static Residential (ultra low latency ~1-2s)
-            # + 1 Rotating Residential (80M+ pool, zero rate limit risk)
-            proxies_to_race = []
-            if self.residential_cycle:
-                p_res = self._get_proxy(self.residential_cycle)
-                if p_res:
-                    proxies_to_race.append(p_res)
 
-            if self.rotating_cycle:
-                p_rot = self._get_proxy(self.rotating_cycle)
-                if p_rot and p_rot not in proxies_to_race:
-                    proxies_to_race.append(p_rot)
-            elif self.proxies:
-                p_gen = self._get_proxy(self.proxies)
-                if p_gen and p_gen not in proxies_to_race:
-                    proxies_to_race.append(p_gen)
+        result = None
 
-            if not proxies_to_race:
-                p_fallback = next(self.proxies) if self.proxies else None
-                if p_fallback:
-                    proxies_to_race.append(p_fallback)
+        # Tier 1: Routine checks on UNLIMITED Static Residential & Shared Proxies (Saves 1GB Rotating Quota!)
+        p_primary = None
+        if self.residential_cycle:
+            p_primary = self._get_proxy(self.residential_cycle)
+        elif self.proxies:
+            p_primary = self._get_proxy(self.proxies)
 
-            tasks = [
-                asyncio.create_task(self._execute_single_check(username, p))
-                for p in proxies_to_race
-            ]
-            result = None
-            for coro in asyncio.as_completed(tasks):
-                res = await coro
-                # ONLY consider active or unavailable as a definitive answer
-                if res.status in {"active", "unavailable"}:
-                    result = res
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    break
+        if p_primary:
+            result = await self._execute_single_check(username, p_primary)
+            if result.status in {"active", "unavailable"}:
+                self.metrics.outcomes[result.status] += 1
+                return result
 
-            # If raced proxies were rate-limited or timed out, avoid blocking cloud datacenter fallback
-            if result is None:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                result = CheckResult("unknown")
-        else:
-            # Direct connection without proxy (e.g. local clean IP)
-            result = await self._execute_single_check(username, None)
+        # Tier 2: Smart Fallback to Rotating Residential ONLY if static proxy was rate-limited, challenged, or timed out
+        # This ensures 99% of requests use $0 unlimited bandwidth and the 1GB quota lasts for months!
+        if self.rotating_cycle and (result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_")):
+            p_rot = self._get_proxy(self.rotating_cycle)
+            if p_rot:
+                rot_res = await self._execute_single_check(username, p_rot)
+                if rot_res.status in {"active", "unavailable"}:
+                    result = rot_res
+                elif result is None:
+                    result = rot_res
+
+        if result is None:
+            result = CheckResult("unknown")
 
         self.metrics.outcomes[result.status] += 1
         return result

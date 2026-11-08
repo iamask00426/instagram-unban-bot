@@ -311,7 +311,7 @@ async def tg_monitoring_worker():
             loop_start = time.monotonic()
             await asyncio.gather(*(process_tg_monitor(r) for r in active_records))
             elapsed = time.monotonic() - loop_start
-            pause = max(0.8, 2.0 - elapsed)
+            pause = max(1.5, 3.5 - elapsed)
             await asyncio.sleep(pause)
 
         except Exception as e:
