@@ -479,8 +479,7 @@ async def monitoring_worker():
                         logging.debug(f"Error checking UID {uid} for username change: {e}")
 
             # 3. Regular active unban/ban/tick monitors (High-Speed Concurrent Batch)
-            records = database.get_all_monitors()
-            active_records = [r for r in records if r.get("status") != "tracking_username"]
+            active_records = database.get_active_monitors()
             if not active_records:
                 await asyncio.sleep(2.0)
                 continue
@@ -522,14 +521,13 @@ async def monitoring_worker():
                     except Exception as e:
                         logging.debug(f"Error checking @{username}: {e}")
 
+            loop_start = time.monotonic()
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
-
-            # Smart pause between check cycles:
-            # Gives residential proxies the breather required so Instagram RLE never flags them.
-            # 2.0s interval means 11 accounts are checked ~30 times a minute.
-            # Unban detection happens in ~2 seconds!
+            elapsed = time.monotonic() - loop_start
             interval = getattr(settings, "check_interval", 2.0) or 2.0
-            await asyncio.sleep(max(1.5, interval))
+            pause = max(0.0, interval - elapsed)
+            if pause > 0:
+                await asyncio.sleep(pause)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
@@ -774,10 +772,16 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
     }
     async def _fetch_res_profile(res_p):
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.5)) as s:
-                async with s.get(f"https://www.instagram.com/{target_clean}/", headers=m_headers, proxy=res_p, allow_redirects=False) as r:
-                    if r.status == 200:
-                        return await r.text()
+            sess = profile_http_session
+            if sess is None or sess.closed:
+                return None
+            async with sess.get(
+                f"https://www.instagram.com/{target_clean}/",
+                headers=m_headers, proxy=res_p, allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=1.5),
+            ) as r:
+                if r.status == 200:
+                    return await r.text()
         except Exception:
             return None
 

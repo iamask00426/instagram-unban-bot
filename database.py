@@ -121,6 +121,12 @@ def init_db():
                 unbanned_at TIMESTAMP NOT NULL
             )
         """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_monitors_status ON monitors(status)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_monitors_created ON monitors(created_at ASC)"
+        )
         conn.commit()
 
 def add_monitors(usernames: list[str], mode: str, guild_id: int, channel_id: int, added_by: int) -> list[str]:
@@ -190,6 +196,16 @@ def get_all_monitors() -> list[dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM monitors ORDER BY created_at ASC")
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+def get_active_monitors() -> list[dict]:
+    """Return only monitors with status != 'tracking_username' — filtered in SQL."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM monitors WHERE status != 'tracking_username' ORDER BY created_at ASC"
+        )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 

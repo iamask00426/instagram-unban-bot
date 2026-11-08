@@ -247,43 +247,49 @@ async def instant_check(chat_id: int, monitor_data: dict):
 
 async def tg_monitoring_worker():
     logging.info("Telegram background monitoring loop started.")
+    sem = asyncio.Semaphore(12)
+    last_tracking_check = 0.0
+
     while True:
         try:
+            now = time.monotonic()
+
             # 1. Clean up expired 24h username tracking accounts
             expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
             for exp in expired:
                 logging.info(f"TG: 24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')})")
 
-            # 2. Check 24h username tracking accounts using their user_id
-            tracking_records = database.get_username_tracking_monitors()
-            for rec in tracking_records:
-                uid = rec.get("user_id")
-                if not uid:
-                    continue
-                old_username = rec.get("username")
-                old_raw = rec.get("raw_username")
-                chat_id = rec.get("guild_id") or rec.get("channel_id")
+            # 2. Check 24h username tracking accounts — throttled to every 60s,
+            #    run concurrently (no per-user sleep).
+            if now - last_tracking_check > 60.0:
+                last_tracking_check = now
+                tracking_records = database.get_username_tracking_monitors()
 
-                try:
-                    proxy = next(checker.proxies) if checker and checker.proxies else None
-                    current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
-                    if current_name and current_name.lower() != old_username.lower():
-                        logging.info(f"TG: Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
-                        database.update_tracked_username(old_username, current_name, chat_id)
-                        await send_tg_username_change_alert(chat_id, old_raw, current_name, uid)
-                except Exception as e:
-                    logging.debug(f"Error checking UID {uid} for username change in TG: {e}")
+                async def _check_tracking(rec):
+                    uid = rec.get("user_id")
+                    if not uid:
+                        return
+                    old_username = rec.get("username")
+                    old_raw = rec.get("raw_username")
+                    chat_id = rec.get("guild_id") or rec.get("channel_id")
+                    try:
+                        proxy = next(checker.proxies) if checker and checker.proxies else None
+                        current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
+                        if current_name and current_name.lower() != old_username.lower():
+                            logging.info(f"TG: Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
+                            database.update_tracked_username(old_username, current_name, chat_id)
+                            await send_tg_username_change_alert(chat_id, old_raw, current_name, uid)
+                    except Exception as e:
+                        logging.debug(f"Error checking UID {uid} for username change in TG: {e}")
 
-                await asyncio.sleep(0.5)
+                if tracking_records:
+                    await asyncio.gather(*(_check_tracking(r) for r in tracking_records))
 
             # 3. Regular active monitors (High-Speed Concurrent Batch)
-            records = database.get_all_monitors()
-            active_records = [r for r in records if r.get("status") != "tracking_username"]
-            if not active_records and not tracking_records:
+            active_records = database.get_active_monitors()
+            if not active_records:
                 await asyncio.sleep(2.0)
                 continue
-
-            sem = asyncio.Semaphore(12)
 
             async def process_tg_monitor(rec):
                 async with sem:
@@ -302,9 +308,13 @@ async def tg_monitoring_worker():
                     except Exception as e:
                         logging.debug(f"TG loop error checking @{username}: {e}")
 
+            loop_start = time.monotonic()
             await asyncio.gather(*(process_tg_monitor(r) for r in active_records))
+            elapsed = time.monotonic() - loop_start
+            pause = max(0.0, 2.0 - elapsed)
+            if pause > 0:
+                await asyncio.sleep(pause)
 
-            await asyncio.sleep(2.0)
         except Exception as e:
             logging.error(f"Unexpected error in TG monitor worker: {e}")
             await asyncio.sleep(3.0)
