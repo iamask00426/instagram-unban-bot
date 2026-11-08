@@ -529,9 +529,8 @@ async def monitoring_worker():
             loop_start = time.monotonic()
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
             elapsed = time.monotonic() - loop_start
-            pause = max(0.0, 2.0 - elapsed)
-            if pause > 0:
-                await asyncio.sleep(pause)
+            pause = max(0.8, 2.0 - elapsed)
+            await asyncio.sleep(pause)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
