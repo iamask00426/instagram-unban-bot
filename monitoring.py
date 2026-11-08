@@ -286,6 +286,10 @@ class ProfileChecker:
         if proxy:
             self._proxy_cooldowns[proxy] = time.monotonic() + seconds
 
+    def _cleanup_cooldowns(self):
+        now = time.monotonic()
+        self._proxy_cooldowns = {p: t for p, t in self._proxy_cooldowns.items() if t > now}
+
     def _get_proxy(self, cycle_iter):
         if not cycle_iter:
             return None
@@ -356,6 +360,7 @@ class ProfileChecker:
 
     async def check(self, username):
         username = normalize_username(username)
+        self._cleanup_cooldowns()
         if self.proxies:
             # Race 2 healthy proxies (1 static residential + 1 from general pool)
             # This maintains ultra-low latency without saturating proxy bandwidth or triggering Meta RLE
@@ -522,7 +527,7 @@ class MonitorScheduler:
                 record.unavailable_count = 0
                 if result.status == "active":
                     record.failures = 0
-                else:
+                elif result.status != "unknown":
                     record.failures += 1
                     delay = max(delay, backoff(self.settings.backoff_base, self.settings.backoff_max, record.failures))
             target = (record.mode == "unban" and result.status == "active") or (
