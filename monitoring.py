@@ -277,9 +277,10 @@ class ProfileChecker:
         self.session, self.settings = session, settings
         self.metrics = metrics if metrics is not None else Metrics()
         self.proxies = itertools.cycle(settings.proxies) if settings.proxies else None
-        # Always keep high-reputation static residential proxies in dedicated cycle
-        from config import RESIDENTIAL_PROXIES
+        # Always keep high-reputation static residential & rotating residential proxies in dedicated cycles
+        from config import RESIDENTIAL_PROXIES, ROTATING_RESIDENTIAL_PROXIES
         self.residential_cycle = itertools.cycle(RESIDENTIAL_PROXIES) if RESIDENTIAL_PROXIES else None
+        self.rotating_cycle = itertools.cycle(ROTATING_RESIDENTIAL_PROXIES) if ROTATING_RESIDENTIAL_PROXIES else None
         self._proxy_cooldowns = {}
 
     def _mark_cooldown(self, proxy: str | None, seconds: float = 60.0):
@@ -295,7 +296,7 @@ class ProfileChecker:
             return None
         now = time.monotonic()
         # Find a proxy that is not temporarily cooled down
-        for _ in range(15):
+        for _ in range(25):
             p = next(cycle_iter)
             if self._proxy_cooldowns.get(p, 0) <= now:
                 return p
@@ -316,7 +317,7 @@ class ProfileChecker:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
         try:
-            timeout_sec = 2.5
+            timeout_sec = 5.0
             async with self.session.get(
                 url, headers=headers, proxy=proxy, allow_redirects=False,
                 auto_decompress=False, timeout=aiohttp.ClientTimeout(total=timeout_sec),
@@ -361,22 +362,29 @@ class ProfileChecker:
     async def check(self, username):
         username = normalize_username(username)
         self._cleanup_cooldowns()
-        if self.proxies:
-            # Race 2 healthy proxies (1 static residential + 1 from general pool)
-            # This maintains ultra-low latency without saturating proxy bandwidth or triggering Meta RLE
+        if self.proxies or self.residential_cycle or self.rotating_cycle:
+            # Race 2 healthy proxies:
+            # 1 Static Residential (ultra low latency ~1-2s)
+            # + 1 Rotating Residential (80M+ pool, zero rate limit risk)
             proxies_to_race = []
             if self.residential_cycle:
                 p_res = self._get_proxy(self.residential_cycle)
                 if p_res:
                     proxies_to_race.append(p_res)
-            
-            p_gen = self._get_proxy(self.proxies)
-            if p_gen and p_gen not in proxies_to_race:
-                proxies_to_race.append(p_gen)
+
+            if self.rotating_cycle:
+                p_rot = self._get_proxy(self.rotating_cycle)
+                if p_rot and p_rot not in proxies_to_race:
+                    proxies_to_race.append(p_rot)
+            elif self.proxies:
+                p_gen = self._get_proxy(self.proxies)
+                if p_gen and p_gen not in proxies_to_race:
+                    proxies_to_race.append(p_gen)
 
             if not proxies_to_race:
-                p_fallback = next(self.proxies)
-                proxies_to_race.append(p_fallback)
+                p_fallback = next(self.proxies) if self.proxies else None
+                if p_fallback:
+                    proxies_to_race.append(p_fallback)
 
             tasks = [
                 asyncio.create_task(self._execute_single_check(username, p))

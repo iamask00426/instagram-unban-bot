@@ -104,17 +104,47 @@ def _number(env, key, default, low, high, integer=False):
         raise ValueError(f"{key} must be between {low} and {high}.") from None
 
 
-RESIDENTIAL_PROXIES = (
-    # Webshare Static Residential Proxies (99.8% Success Rate)
-    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
-    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
-    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
-    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
-    "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194",
+ROTATING_RESIDENTIAL_PROXIES = (
+    # Webshare 80M+ Rotating Residential Pool (Plan 14809548)
+    "http://huezajafresidential-rotate:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-1:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-2:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-3:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-4:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-5:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-6:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-7:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-8:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-9:0lsun8mr921c@p.webshare.io:80",
+    "http://huezajafresidential-10:0lsun8mr921c@p.webshare.io:80",
 )
 
-BUILTIN_PROXIES = RESIDENTIAL_PROXIES + (
-    # Webshare Proxy Server Shared Proxies
+RESIDENTIAL_PROXIES = (
+    # Webshare Fresh Static Residential Proxies (Plan 14809547 - High Reputation)
+    "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194",
+    "http://huezajafstaticresidential:0lsun8mr921c@195.40.128.32:6752",
+    "http://huezajafstaticresidential:0lsun8mr921c@103.243.147.125:6104",
+    "http://huezajafstaticresidential:0lsun8mr921c@188.221.55.71:9560",
+    "http://huezajafstaticresidential:0lsun8mr921c@195.40.143.198:5419",
+    "http://huezajafstaticresidential:0lsun8mr921c@193.160.83.89:6410",
+    "http://huezajafstaticresidential:0lsun8mr921c@87.86.9.198:6345",
+    "http://huezajafstaticresidential:0lsun8mr921c@31.98.15.178:5355",
+    "http://huezajafstaticresidential:0lsun8mr921c@46.203.60.217:7217",
+    "http://huezajafstaticresidential:0lsun8mr921c@195.40.138.130:5850",
+    "http://huezajafstaticresidential:0lsun8mr921c@5.59.250.174:6872",
+    "http://huezajafstaticresidential:0lsun8mr921c@140.233.169.102:7819",
+    "http://huezajafstaticresidential:0lsun8mr921c@136.143.252.12:6161",
+    "http://huezajafstaticresidential:0lsun8mr921c@199.187.189.126:6917",
+    "http://huezajafstaticresidential:0lsun8mr921c@31.98.13.148:6325",
+    "http://huezajafstaticresidential:0lsun8mr921c@130.185.126.234:6849",
+    "http://huezajafstaticresidential:0lsun8mr921c@195.40.133.110:6330",
+    "http://huezajafstaticresidential:0lsun8mr921c@166.0.41.84:6592",
+    "http://huezajafstaticresidential:0lsun8mr921c@5.59.251.126:6165",
+    "http://huezajafstaticresidential:0lsun8mr921c@166.0.43.151:5659",
+)
+
+BUILTIN_PROXIES = ROTATING_RESIDENTIAL_PROXIES + RESIDENTIAL_PROXIES + (
+    # Webshare Proxy Server Shared Proxies (Plan 14394551)
     "http://huezajaf:0lsun8mr921c@185.171.254.141:6173",
     "http://huezajaf:0lsun8mr921c@185.226.205.139:5671",
     "http://huezajaf:0lsun8mr921c@82.24.238.234:7041",
@@ -158,31 +188,35 @@ class Settings:
 
         parsed_proxies = []
         if download_url:
-            try:
-                import urllib.request
-                import ssl
-                req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+            import urllib.request
+            import ssl
+            for single_url in re.split(r"[,;\s\r\n]+", download_url):
+                single_url = single_url.strip()
+                if not single_url or not single_url.startswith("http"):
+                    continue
                 try:
-                    ctx = ssl.create_default_context()
-                    resp_cm = urllib.request.urlopen(req, timeout=10, context=ctx)
-                except Exception:
-                    unverified_ctx = ssl._create_unverified_context()
-                    resp_cm = urllib.request.urlopen(req, timeout=10, context=unverified_ctx)
-                with resp_cm as resp:
-                    text = resp.read().decode("utf-8", errors="ignore")
-                    for line in text.splitlines():
-                        line = line.strip()
-                        if line:
-                            try:
-                                parsed_proxies.append(parse_proxy_entry(line))
-                            except Exception:
-                                pass
-            except Exception as e:
-                import logging
-                logging.warning(f"Error downloading proxies from Webshare: {e}")
-            else:
-                import logging
-                logging.info(f"Downloaded {len(parsed_proxies)} proxies from Webshare URL.")
+                    req = urllib.request.Request(single_url, headers={"User-Agent": "Mozilla/5.0"})
+                    try:
+                        ctx = ssl.create_default_context()
+                        resp_cm = urllib.request.urlopen(req, timeout=10, context=ctx)
+                    except Exception:
+                        unverified_ctx = ssl._create_unverified_context()
+                        resp_cm = urllib.request.urlopen(req, timeout=10, context=unverified_ctx)
+                    with resp_cm as resp:
+                        text = resp.read().decode("utf-8", errors="ignore")
+                        for line in text.splitlines():
+                            line = line.strip()
+                            if line:
+                                try:
+                                    parsed_proxies.append(parse_proxy_entry(line))
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Error downloading proxies from Webshare ({single_url[:40]}...): {e}")
+
+            import logging
+            logging.info(f"Downloaded {len(parsed_proxies)} total proxies from Webshare URL(s).")
 
         if raw_proxies:
             for p in re.split(r"[,;\r\n]+", raw_proxies):
@@ -192,7 +226,11 @@ class Settings:
                     except Exception:
                         pass
 
-        # Ensure high-success Static Residential proxies are also blended into the pool
+        # Ensure high-success Static Residential and Rotating Residential proxies are blended into pool
+        for rot_p in ROTATING_RESIDENTIAL_PROXIES:
+            if rot_p not in parsed_proxies:
+                parsed_proxies.append(rot_p)
+
         for res_p in RESIDENTIAL_PROXIES:
             if res_p not in parsed_proxies:
                 parsed_proxies.append(res_p)
