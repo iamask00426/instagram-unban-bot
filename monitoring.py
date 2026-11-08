@@ -597,6 +597,7 @@ async def fetch_user_id_by_username(session: aiohttp.ClientSession, proxy: str |
     headers = {
         "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
     }
     try:
         async with session.get(url, headers=headers, proxy=proxy,
@@ -620,11 +621,12 @@ async def resolve_username_by_uid(session: aiohttp.ClientSession, proxy: str | N
     headers = {
         "User-Agent": "Instagram 275.0.0.27.98 Android (30/11; 480dpi; 1080x2400; OnePlus; GM1910; OnePlus7Pro; qcom; en_US; 314591244)",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
     }
     try:
         async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=6)) as resp:
             if resp.status == 200:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 return data.get("user", {}).get("username")
     except Exception as e:
         logging.warning(f"Error resolving username for UID {user_id}: {e}")

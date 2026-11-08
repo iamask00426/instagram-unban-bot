@@ -192,20 +192,29 @@ def remove_monitor(username: str, guild_id: int = None):
             cursor.execute("DELETE FROM monitors WHERE username = ?", (username.lower(),))
         conn.commit()
 
-def get_all_monitors() -> list[dict]:
+def get_all_monitors(guild_id: int = None) -> list[dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM monitors ORDER BY created_at ASC")
+        if guild_id:
+            cursor.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at ASC", (guild_id,))
+        else:
+            cursor.execute("SELECT * FROM monitors ORDER BY created_at ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
-def get_active_monitors() -> list[dict]:
+def get_active_monitors(guild_id: int = None) -> list[dict]:
     """Return only monitors with status != 'tracking_username' — filtered in SQL."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM monitors WHERE status != 'tracking_username' ORDER BY created_at ASC"
-        )
+        if guild_id:
+            cursor.execute(
+                "SELECT * FROM monitors WHERE status != 'tracking_username' AND guild_id = ? ORDER BY created_at ASC",
+                (guild_id,)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM monitors WHERE status != 'tracking_username' ORDER BY created_at ASC"
+            )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 

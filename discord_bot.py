@@ -15,7 +15,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 import database
-from config import Settings, extract_username, parse_usernames
+from config import Settings, extract_username, parse_usernames, RESIDENTIAL_PROXIES
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
 from telegram_forwarder import forward_to_telegram
@@ -200,9 +200,9 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
         is_verified = getattr(result, "is_verified", False)
         card_io = None
         card_proxy = None
-        if checker and hasattr(checker, "proxies"):
+        if checker and hasattr(checker, "proxies") and checker.proxies:
             try:
-                card_proxy = next(checker.proxies)
+                card_proxy = checker._get_proxy(checker.proxies)
             except Exception:
                 pass
         if style != 3:
@@ -439,37 +439,39 @@ async def monitoring_worker():
     """Background monitoring loop that continuously cycles through stored accounts."""
     await bot.wait_until_ready()
     logging.info("Discord monitoring loop worker started.")
-    
+
     sem = asyncio.Semaphore(12)
     last_tracking_check = 0.0
-    
+    last_cleanup_check = 0.0
+
     while not bot.is_closed():
         try:
             now = time.monotonic()
 
-            # 1. Clean up expired 24h username tracking accounts (> 86400s / 24h)
-            expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
-            for exp in expired:
-                logging.info(f"24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')}, Guild: {exp['guild_id']})")
+            # 1. Clean up expired 24h username tracking accounts — throttled to every 5 minutes
+            if now - last_cleanup_check > 300.0:
+                last_cleanup_check = now
+                expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
+                for exp in expired:
+                    logging.info(f"24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')}, Guild: {exp['guild_id']})")
 
-            # 2. Check 24h username tracking accounts periodically (every 60s, NOT every cycle!)
-            # This prevents serial delays from blocking the primary unban monitoring pipeline.
+            # 2. Check 24h username tracking accounts every 60s — parallel, not serial
             if now - last_tracking_check > 60.0:
                 last_tracking_check = now
                 tracking_records = database.get_username_tracking_monitors()
-                for rec in tracking_records:
+
+                async def _check_tracking(rec):
                     if bot.is_closed():
-                        break
+                        return
                     uid = rec.get("user_id")
                     if not uid:
-                        continue
+                        return
                     old_username = rec.get("username")
                     old_raw = rec.get("raw_username")
                     guild_id = rec.get("guild_id")
                     guild = bot.get_guild(guild_id)
-
                     try:
-                        proxy = next(checker.proxies) if checker and checker.proxies else None
+                        proxy = checker._get_proxy(checker.proxies) if checker and checker.proxies else None
                         current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
                         if current_name and current_name.lower() != old_username.lower():
                             logging.info(f"Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
@@ -477,6 +479,9 @@ async def monitoring_worker():
                             await send_username_change_alert(guild, rec, old_raw, current_name, uid)
                     except Exception as e:
                         logging.debug(f"Error checking UID {uid} for username change: {e}")
+
+                if tracking_records:
+                    await asyncio.gather(*(_check_tracking(r) for r in tracking_records), return_exceptions=True)
 
             # 3. Regular active unban/ban/tick monitors (High-Speed Concurrent Batch)
             active_records = database.get_active_monitors()
@@ -554,9 +559,7 @@ async def on_resumed():
 @bot.command(name="backup", aliases=["export"])
 async def backup_command(ctx):
     """Exports all currently monitored accounts."""
-    records = database.get_all_monitors()
-    if ctx.guild:
-        records = [r for r in records if r["guild_id"] == ctx.guild.id]
+    records = database.get_all_monitors(ctx.guild.id if ctx.guild else None)
     if not records:
         return await ctx.send("ℹ️ No active monitors found to backup.")
 
@@ -675,9 +678,7 @@ async def tick_command(ctx, *, raw_input: str = None):
 @bot.command(name="list", aliases=["active"])
 async def list_command(ctx, *, target: str = None):
     guild_id = ctx.guild.id if ctx.guild else 0
-    records = database.get_all_monitors()
-    if guild_id:
-        records = [r for r in records if r["guild_id"] == guild_id]
+    records = database.get_all_monitors(guild_id or None)
 
     if target:
         parsed = parse_usernames(target)
@@ -742,14 +743,6 @@ async def kill_command(ctx, *, raw_input: str = None):
     }
     await send_ban_alert(ctx.guild, mon_data, is_fake=True)
     await ctx.send(f"💀 Fake ban alert dispatched for `@{target_user}`.")
-
-RESIDENTIAL_PROXIES = [
-    "http://huezajafstaticresidential:0lsun8mr921c@9.142.218.198:6862",
-    "http://huezajafstaticresidential:0lsun8mr921c@72.1.136.34:6925",
-    "http://huezajafstaticresidential:0lsun8mr921c@82.23.86.203:7461",
-    "http://huezajafstaticresidential:0lsun8mr921c@192.53.66.123:6229",
-    "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194"
-]
 
 async def resolve_instagram_profile_data(username: str, checker: ProfileChecker = None) -> dict:
     data = {
