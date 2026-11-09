@@ -144,14 +144,8 @@ async def deliver_alert_to_channel(ch: discord.TextChannel, content: str, card_i
         return False
 
 async def forward_alert_if_configured(guild_id: int, text: str, card_io: BytesIO | None = None):
-    if not guild_id:
-        return
-    st = database.get_server_settings(guild_id)
-    token = st.get("tg_bot_token")
-    chat_id = st.get("tg_chat_id")
-    if token and chat_id:
-        clean_text = text.replace("**", "<b>").replace("**", "</b>").replace("*", "<i>").replace("*", "</i>")
-        await forward_to_telegram(token, chat_id, clean_text, card_io)
+    # Telegram forwarding disabled per user request
+    return
 
 async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_fake: bool = False, custom_time: str = None):
     guild_id = monitor_data.get("guild_id", 0)
@@ -495,11 +489,19 @@ async def monitoring_worker():
                 if tracking_records:
                     await asyncio.gather(*(_check_tracking(r) for r in tracking_records), return_exceptions=True)
 
-            # 3. Regular active unban/ban/tick monitors (High-Speed Concurrent Batch)
+            # 3. Regular active unban/ban/tick monitors (Paced Queue Engine for 100+ accounts)
             active_records = database.get_active_monitors()
-            if not active_records:
+            total_accounts = len(active_records)
+            if not total_accounts:
                 await asyncio.sleep(2.0)
                 continue
+
+            # Calculate safe, paced pacing across 50-60s target cycle
+            # e.g., 10 accounts -> 35s cycle (3.5s per account)
+            # e.g., 50 accounts -> 50s cycle (1.0s per account)
+            # e.g., 100 accounts -> 60s cycle (0.6s per account)
+            target_cycle_time = max(35.0, min(60.0, total_accounts * 0.6))
+            delay_per_account = target_cycle_time / total_accounts
 
             async def process_active_monitor(rec):
                 async with sem:
@@ -538,11 +540,18 @@ async def monitoring_worker():
                     except Exception as e:
                         logging.debug(f"Error checking @{username}: {e}")
 
-            loop_start = time.monotonic()
-            await asyncio.gather(*(process_active_monitor(r) for r in active_records))
-            elapsed = time.monotonic() - loop_start
-            pause = max(2.5, 4.5 - elapsed)
-            await asyncio.sleep(pause)
+            # Process accounts in smooth paced cadence (no burst spikes)
+            tasks = []
+            for rec in active_records:
+                if bot.is_closed():
+                    break
+                t = asyncio.create_task(process_active_monitor(rec))
+                tasks.append(t)
+                await asyncio.sleep(delay_per_account)
+
+            # Await any remaining in-flight tasks from this cycle
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
             logging.error(f"Unexpected error in Discord monitor worker: {e}")
