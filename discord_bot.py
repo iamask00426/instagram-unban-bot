@@ -433,6 +433,23 @@ async def instant_check(guild: discord.Guild, monitor_data: dict):
         try:
             res = await checker.check(username)
             if mode == "unban" and res.status == "active":
+                if not res.followers or res.followers == "?":
+                    try:
+                        prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=1.8)
+                        if prof_data.get("followers"):
+                            res.followers = prof_data["followers"]
+                        if prof_data.get("following"):
+                            res.following = prof_data["following"]
+                        if prof_data.get("posts"):
+                            res.posts = prof_data["posts"]
+                        if prof_data.get("pic_url"):
+                            res.pic_url = prof_data["pic_url"]
+                        if prof_data.get("full_name"):
+                            res.full_name = prof_data["full_name"]
+                        if prof_data.get("user_id"):
+                            res.user_id = prof_data["user_id"]
+                    except Exception:
+                        pass
                 await send_unban_alert(guild, monitor_data, res)
             elif mode == "ban" and res.status == "unavailable":
                 await send_ban_alert(guild, monitor_data)

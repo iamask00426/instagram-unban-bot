@@ -366,7 +366,8 @@ class ProfileChecker:
         result = None
 
         # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
-        for _ in range(3):
+        proxy_attempts = 2 if (self.proxies or self.residential_cycle) else 0
+        for _ in range(proxy_attempts):
             p_primary = None
             if self.proxies:
                 p_primary = self._get_proxy(self.proxies)
@@ -388,9 +389,24 @@ class ProfileChecker:
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)
                 if rot_res.status in {"active", "unavailable"}:
-                    result = rot_res
+                    self.metrics.outcomes[rot_res.status] += 1
+                    return rot_res
                 elif result is None:
                     result = rot_res
+
+        # Tier 3: Direct Connection Fallback
+        # If proxies are rate-limited (302 is_from_rle login redirect) or errored out,
+        # execute a clean direct check so monitoring never goes blind or misses alerts.
+        if result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_") or result.status.startswith("HTTP_"):
+            try:
+                direct_res = await self._execute_single_check(username, None)
+                if direct_res.status in {"active", "unavailable"}:
+                    self.metrics.outcomes[direct_res.status] += 1
+                    return direct_res
+                if result is None:
+                    result = direct_res
+            except Exception as e:
+                logging.debug(f"Direct fallback check error for @{username}: {e}")
 
         if result is None:
             result = CheckResult("unknown")
