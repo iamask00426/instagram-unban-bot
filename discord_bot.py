@@ -14,7 +14,7 @@ from discord.ext import commands
 import aiohttp
 from dotenv import load_dotenv
 
-import database  # Now using async database layer
+import database_sync as database  # Discord bot uses sync database (blocking calls are fine in discord.py's thread executor)
 from config import Settings, extract_username, parse_usernames, RESIDENTIAL_PROXIES
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
