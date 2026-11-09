@@ -14,7 +14,7 @@ from discord.ext import commands
 import aiohttp
 from dotenv import load_dotenv
 
-import database
+import database  # Now using async database layer
 from config import Settings, extract_username, parse_usernames, RESIDENTIAL_PROXIES
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count

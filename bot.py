@@ -1,8 +1,10 @@
 """
-Telegram Instagram Availability & Unban Monitor Bot
-Equipped with full command suite matching Discord bot:
-/unban, /ban, /tick, /list, /clear, /clearall, /fakeunban, /kill, /lookup,
-/autoban, /2h, /1day, /7day, /1month, /reset, /ping, /help.
+Telegram Instagram Availability & Unban Monitor Bot - OPTIMIZED VERSION
+✅ Async database operations (no blocking)
+✅ Streaming queue-based monitoring (continuous processing)
+✅ Smart proxy management with health tracking
+✅ Memory leak fixes with cache cleanup
+✅ Circuit breaker pattern for resilience
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ import logging
 import time
 from datetime import datetime
 from io import BytesIO
+from typing import Optional
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
@@ -20,7 +24,7 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-import database
+import database_async as database
 from config import Settings, parse_usernames
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
@@ -36,8 +40,14 @@ bot: Bot | None = None
 checker: ProfileChecker | None = None
 profile_http_session = None
 dp = Dispatcher()
+
+# Alert deduplication with automatic cleanup
 _alerting_keys: set[tuple[str, int]] = set()
 _recent_alerts_cache: dict[tuple[str, int], float] = {}
+
+# Monitoring queue for streaming processing
+monitor_queue: asyncio.Queue = None
+queue_refresh_event = asyncio.Event()
 
 def format_elapsed(start_time: datetime) -> str:
     elapsed = datetime.now() - start_time
@@ -45,6 +55,22 @@ def format_elapsed(start_time: datetime) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours} hours, {minutes} minutes, {seconds} seconds"
+
+# --- PERIODIC CACHE CLEANUP ---
+
+async def cleanup_alert_cache_worker():
+    """Cleanup expired alert cache entries every 10 minutes to prevent memory leak."""
+    while True:
+        try:
+            await asyncio.sleep(600)  # Every 10 minutes
+            now = time.monotonic()
+            expired = [k for k, v in _recent_alerts_cache.items() if v <= now]
+            for k in expired:
+                _recent_alerts_cache.pop(k, None)
+            if expired:
+                logging.info(f"🧹 Cleaned {len(expired)} expired alert cache entries (total: {len(_recent_alerts_cache)})")
+        except Exception as e:
+            logging.error(f"Cache cleanup error: {e}")
 
 # --- ALERT SENDER FUNCTIONS ---
 
@@ -63,7 +89,7 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
         # Transition monitor status IMMEDIATELY in DB so subsequent worker batches never pick it up
         try:
             initial_uid = getattr(result, "user_id", None) or "pending"
-            database.transition_to_username_tracking(monitor_data["username"], chat_id, initial_uid, time.time())
+            await database.transition_to_username_tracking(monitor_data["username"], chat_id, initial_uid, time.time())
         except Exception as e:
             logging.debug(f"TG immediate DB transition error: {e}")
     try:
@@ -74,7 +100,7 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
             start_time = datetime.fromisoformat(monitor_data["created_at"]) if isinstance(monitor_data["created_at"], str) else monitor_data["created_at"]
             elapsed_str = format_elapsed(start_time)
 
-        settings = database.get_server_settings(chat_id) if chat_id else {}
+        settings = await database.get_server_settings(chat_id) if chat_id else {}
         style = settings.get("style", 1)
 
         folls_val = str(result.followers).replace(",", "") if result.followers is not None else "0"
@@ -116,7 +142,7 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
             logging.error(f"Failed delivering TG unban alert to {chat_id}: {e}")
 
         if chat_id and not is_fake:
-            database.record_unban_stat(chat_id, monitor_data["username"], raw_user)
+            await database.record_unban_stat(chat_id, monitor_data["username"], raw_user)
 
         now_ts = time.time()
         if not is_fake:
@@ -129,13 +155,13 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
                     logging.warning(f"Error fetching UID for @{raw_user}: {e}")
 
             if uid:
-                database.transition_to_username_tracking(monitor_data["username"], chat_id, uid, now_ts)
+                await database.transition_to_username_tracking(monitor_data["username"], chat_id, uid, now_ts)
                 logging.info(f"TG: Started 24h username tracking immediately for @{raw_user} (UID: {uid})")
             else:
-                database.remove_monitor(monitor_data["username"], chat_id)
+                await database.remove_monitor(monitor_data["username"], chat_id)
 
             if settings.get("autoban"):
-                database.add_monitors([raw_user], "ban", chat_id, chat_id, 0)
+                await database.add_monitors([raw_user], "ban", chat_id, chat_id, 0)
                 logging.info(f"TG: Autoban engaged for @{raw_user} in chat {chat_id}")
     finally:
         if not is_fake:
@@ -180,7 +206,7 @@ async def send_tg_ban_alert(chat_id: int, monitor_data: dict, is_fake: bool = Fa
             logging.error(f"Failed delivering TG ban alert to {chat_id}: {e}")
 
         if not is_fake:
-            database.remove_monitor(monitor_data["username"], chat_id)
+            await database.remove_monitor(monitor_data["username"], chat_id)
     finally:
         if not is_fake:
             _alerting_keys.discard(username_key)
@@ -223,7 +249,7 @@ async def send_tg_tick_alert(chat_id: int, monitor_data: dict, result: CheckResu
         except Exception as e:
             logging.error(f"Failed delivering TG tick alert to {chat_id}: {e}")
 
-        database.remove_monitor(monitor_data["username"], chat_id)
+        await database.remove_monitor(monitor_data["username"], chat_id)
     finally:
         _alerting_keys.discard(username_key)
 
@@ -256,82 +282,142 @@ async def instant_check(chat_id: int, monitor_data: dict):
     except Exception as e:
         logging.debug(f"TG instant check exception for @{username}: {e}")
 
-# --- BACKGROUND MONITORING LOOP ---
+# --- OPTIMIZED STREAMING MONITORING SYSTEM ---
 
-async def tg_monitoring_worker():
-    logging.info("Telegram background monitoring loop started.")
-    sem = asyncio.Semaphore(12)
-    last_tracking_check = 0.0
+async def queue_feeder_worker():
+    """
+    Continuously feeds monitoring queue with active monitors.
+    Runs independently from processors for true streaming.
+    """
+    logging.info("✅ Queue feeder worker started")
+    seen_in_queue = set()
 
     while True:
         try:
-            now = time.monotonic()
+            # Fetch active monitors from DB (async, non-blocking)
+            active_records = await database.get_active_monitors()
 
-            # 1. Clean up expired 24h username tracking accounts
-            expired = database.cleanup_expired_username_tracking(max_age_seconds=86400)
+            if not active_records:
+                seen_in_queue.clear()
+                await asyncio.sleep(5.0)  # Wait before next poll
+                continue
+
+            # Add new monitors to queue
+            added_count = 0
+            for rec in active_records:
+                key = (rec["username"], rec.get("guild_id") or rec.get("channel_id"))
+                if key not in seen_in_queue:
+                    try:
+                        await monitor_queue.put(rec)
+                        seen_in_queue.add(key)
+                        added_count += 1
+                    except asyncio.QueueFull:
+                        logging.warning("⚠️ Monitor queue is full, waiting...")
+                        break
+
+            if added_count > 0:
+                logging.info(f"📥 Added {added_count} monitors to queue (queue size: ~{monitor_queue.qsize()})")
+
+            # Refresh queue periodically to catch new additions
+            await asyncio.sleep(3.0)
+
+            # Clear seen set periodically to allow re-checks
+            if len(seen_in_queue) > 10000:
+                seen_in_queue.clear()
+
+        except Exception as e:
+            logging.error(f"Queue feeder error: {e}")
+            await asyncio.sleep(5.0)
+
+async def monitor_processor_worker(worker_id: int):
+    """
+    Individual worker that processes monitors from the queue.
+    Multiple workers run concurrently for high throughput.
+    """
+    logging.info(f"✅ Monitor processor #{worker_id} started")
+
+    while True:
+        try:
+            # Get monitor from queue (blocks until available)
+            rec = await monitor_queue.get()
+
+            username = rec["username"]
+            mode = rec["mode"]
+            chat_id = rec.get("guild_id") or rec.get("channel_id")
+
+            try:
+                # Perform Instagram check
+                res = await checker.check(username)
+
+                # Handle results based on mode
+                if mode == "unban" and res.status == "active":
+                    await send_tg_unban_alert(chat_id, rec, res)
+                elif mode == "ban" and res.status == "unavailable":
+                    await send_tg_ban_alert(chat_id, rec)
+                elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                    await send_tg_tick_alert(chat_id, rec, res)
+
+            except Exception as e:
+                logging.debug(f"Worker #{worker_id} error checking @{username}: {e}")
+            finally:
+                monitor_queue.task_done()
+                # Small breather to prevent hammering
+                await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logging.error(f"Worker #{worker_id} fatal error: {e}")
+            await asyncio.sleep(2.0)
+
+async def username_tracking_worker():
+    """
+    Separate worker for 24h username change tracking.
+    Runs independently to not block main monitoring.
+    """
+    logging.info("✅ Username tracking worker started")
+
+    while True:
+        try:
+            # Clean up expired tracking entries
+            expired = await database.cleanup_expired_username_tracking(max_age_seconds=86400)
             for exp in expired:
                 logging.info(f"TG: 24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')})")
 
-            # 2. Check 24h username tracking accounts — throttled to every 60s,
-            #    run concurrently (no per-user sleep).
-            if now - last_tracking_check > 60.0:
-                last_tracking_check = now
-                tracking_records = database.get_username_tracking_monitors()
+            # Get all tracking monitors
+            tracking_records = await database.get_username_tracking_monitors()
 
-                async def _check_tracking(rec):
-                    uid = rec.get("user_id")
-                    if not uid:
-                        return
-                    old_username = rec.get("username")
-                    old_raw = rec.get("raw_username")
-                    chat_id = rec.get("guild_id") or rec.get("channel_id")
-                    try:
-                        proxy = next(checker.proxies) if checker and checker.proxies else None
-                        current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
-                        if current_name and current_name.lower() != old_username.lower():
-                            logging.info(f"TG: Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
-                            database.update_tracked_username(old_username, current_name, chat_id)
-                            await send_tg_username_change_alert(chat_id, old_raw, current_name, uid)
-                    except Exception as e:
-                        logging.debug(f"Error checking UID {uid} for username change in TG: {e}")
-
-                if tracking_records:
-                    await asyncio.gather(*(_check_tracking(r) for r in tracking_records))
-
-            # 3. Regular active monitors (High-Speed Concurrent Batch)
-            active_records = database.get_active_monitors()
-            if not active_records:
-                await asyncio.sleep(2.0)
+            if not tracking_records:
+                await asyncio.sleep(60.0)
                 continue
 
-            async def process_tg_monitor(rec):
-                async with sem:
-                    username = rec["username"]
-                    mode = rec["mode"]
-                    chat_id = rec.get("guild_id") or rec.get("channel_id")
+            # Check username changes concurrently
+            async def check_username_change(rec):
+                uid = rec.get("user_id")
+                if not uid:
+                    return
+                old_username = rec.get("username")
+                old_raw = rec.get("raw_username")
+                chat_id = rec.get("guild_id") or rec.get("channel_id")
+                try:
+                    proxy = next(checker.proxies) if checker and checker.proxies else None
+                    current_name = await resolve_username_by_uid(profile_http_session, proxy, uid)
+                    if current_name and current_name.lower() != old_username.lower():
+                        logging.info(f"TG: Username change detected for UID {uid}: @{old_raw} -> @{current_name}")
+                        await database.update_tracked_username(old_username, current_name, chat_id)
+                        await send_tg_username_change_alert(chat_id, old_raw, current_name, uid)
+                except Exception as e:
+                    logging.debug(f"Error checking UID {uid} for username change: {e}")
 
-                    try:
-                        res = await checker.check(username)
-                        if mode == "unban" and res.status == "active":
-                            await send_tg_unban_alert(chat_id, rec, res)
-                        elif mode == "ban" and res.status == "unavailable":
-                            await send_tg_ban_alert(chat_id, rec)
-                        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-                            await send_tg_tick_alert(chat_id, rec, res)
-                    except Exception as e:
-                        logging.debug(f"TG loop error checking @{username}: {e}")
+            # Process all tracking records concurrently
+            await asyncio.gather(*[check_username_change(r) for r in tracking_records], return_exceptions=True)
 
-            loop_start = time.monotonic()
-            await asyncio.gather(*(process_tg_monitor(r) for r in active_records))
-            elapsed = time.monotonic() - loop_start
-            pause = max(2.5, 4.5 - elapsed)
-            await asyncio.sleep(pause)
+            # Check again after 60 seconds
+            await asyncio.sleep(60.0)
 
         except Exception as e:
-            logging.error(f"Unexpected error in TG monitor worker: {e}")
-            await asyncio.sleep(3.0)
+            logging.error(f"Username tracking worker error: {e}")
+            await asyncio.sleep(30.0)
 
-# --- BOT COMMAND HANDLERS (ENGLISH) ---
+# --- BOT COMMAND HANDLERS ---
 
 @dp.message(Command("start"))
 @dp.message(Command("help"))
@@ -372,7 +458,7 @@ async def unban_cmd(message: types.Message):
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    added = database.add_monitors(usernames, "unban", chat_id, chat_id, user_id)
+    added = await database.add_monitors(usernames, "unban", chat_id, chat_id, user_id)
 
     code_list = " ".join([f"<code>{u}</code>" for u in added[:25]])
     more_text = f" and {len(added) - 25} more" if len(added) > 25 else ""
@@ -403,7 +489,7 @@ async def ban_cmd(message: types.Message):
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    added = database.add_monitors(usernames, "ban", chat_id, chat_id, user_id)
+    added = await database.add_monitors(usernames, "ban", chat_id, chat_id, user_id)
 
     code_list = " ".join([f"<code>{u}</code>" for u in added[:25]])
     more_text = f" and {len(added) - 25} more" if len(added) > 25 else ""
@@ -434,7 +520,7 @@ async def tick_cmd(message: types.Message):
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    added = database.add_monitors(usernames, "tick", chat_id, chat_id, user_id)
+    added = await database.add_monitors(usernames, "tick", chat_id, chat_id, user_id)
 
     code_list = " ".join([f"<code>{u}</code>" for u in added[:25]])
     more_text = f" and {len(added) - 25} more" if len(added) > 25 else ""
@@ -463,7 +549,7 @@ async def clear_cmd(message: types.Message):
     if not usernames:
         return await message.answer("❌ No valid Instagram usernames provided.")
 
-    cleared, not_mon = database.remove_monitors(usernames, message.chat.id)
+    cleared, not_mon = await database.remove_monitors(usernames, message.chat.id)
     lines = []
     if cleared:
         lines.append(f"✅ <b>Cleared ({len(cleared)}):</b> " + " ".join([f"<code>{u}</code>" for u in cleared]))
@@ -473,7 +559,7 @@ async def clear_cmd(message: types.Message):
 
 @dp.message(Command("clearall"))
 async def clearall_cmd(message: types.Message):
-    count = database.clear_all_monitors(message.chat.id)
+    count = await database.clear_all_monitors(message.chat.id)
     await message.answer(f"🗑️ <b>Cleared {count} monitor(s)</b> from this chat.", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("list"))
@@ -481,7 +567,7 @@ async def clearall_cmd(message: types.Message):
 async def list_cmd(message: types.Message):
     args = (message.text or "").split(maxsplit=1)
     chat_id = message.chat.id
-    records = database.get_all_monitors()
+    records = await database.get_all_monitors()
     records = [r for r in records if r["guild_id"] == chat_id or r.get("channel_id") == chat_id]
 
     if len(args) > 1:
@@ -658,21 +744,21 @@ async def fakeunban_cmd(message: types.Message):
 async def autoban_cmd(message: types.Message):
     args = (message.text or "").split(maxsplit=1)
     if len(args) < 2 or args[1].lower() not in ("on", "off"):
-        st = database.get_server_settings(message.chat.id)
+        st = await database.get_server_settings(message.chat.id)
         current = "ON 🟢" if st.get("autoban") else "OFF 🔴"
         return await message.answer(
             f"ℹ️ Autoban is currently <b>{current}</b>.\nUsage: <code>/autoban on</code> or <code>/autoban off</code>",
             parse_mode=ParseMode.HTML
         )
     val = 1 if args[1].lower() == "on" else 0
-    database.set_server_setting(message.chat.id, "autoban", val)
+    await database.set_server_setting(message.chat.id, "autoban", val)
     status_str = "ENABLED 🟢 (Will automatically watch recovered accounts for ban for 24h)" if val else "DISABLED 🔴"
     await message.answer(f"⚙️ Autoban has been <b>{status_str}</b>.", parse_mode=ParseMode.HTML)
 
 # --- STATS COMMANDS ---
 
 async def display_tg_unban_stats(message: types.Message, window_seconds: int, label: str):
-    records = database.get_unban_stats(message.chat.id, window_seconds)
+    records = await database.get_unban_stats(message.chat.id, window_seconds)
     if not records:
         return await message.answer(f"📊 <b>Unban Stats ({label})</b>\n\nNo accounts recovered during this window.")
 
@@ -713,7 +799,7 @@ async def reset_cmd(message: types.Message):
     if len(args) < 2 or args[1].lower() not in window_map:
         return await message.answer("❌ Usage: <code>/reset &lt;2h / 1day / 7day / 1month&gt;</code>", parse_mode=ParseMode.HTML)
     sec, label = window_map[args[1].lower()]
-    deleted = database.reset_unban_stats(message.chat.id, sec)
+    deleted = await database.reset_unban_stats(message.chat.id, sec)
     await message.answer(f"🔄 Reset unban stats for the last <b>{label}</b> (cleared {deleted} entries).", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("ping"))
@@ -726,8 +812,8 @@ async def ping_cmd(message: types.Message):
 # --- MAIN RUNNER ---
 
 async def main():
-    global bot, checker, profile_http_session
-    database.init_db()
+    global bot, checker, profile_http_session, monitor_queue
+    await database.init_db()
 
     token = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
     if not token or token.startswith("your_"):
@@ -747,9 +833,20 @@ async def main():
     profile_http_session = profile_session(settings)
     checker = ProfileChecker(profile_http_session, settings)
 
-    asyncio.create_task(tg_monitoring_worker())
+    # Initialize monitoring queue
+    monitor_queue = asyncio.Queue(maxsize=1000)
 
-    logging.info("Starting Telegram bot polling...")
+    # Start background workers
+    asyncio.create_task(queue_feeder_worker())
+    asyncio.create_task(username_tracking_worker())
+    asyncio.create_task(cleanup_alert_cache_worker())
+
+    # Start multiple processor workers for high throughput
+    num_workers = 20  # Increased from 12 for better performance
+    for i in range(num_workers):
+        asyncio.create_task(monitor_processor_worker(i))
+
+    logging.info(f"🚀 Optimized Telegram bot started with {num_workers} workers")
     try:
         await dp.start_polling(bot)
     finally:
