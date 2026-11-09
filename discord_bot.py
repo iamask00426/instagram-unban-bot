@@ -38,6 +38,7 @@ profile_http_session = None
 
 
 _alerting_keys: set[tuple[str, int]] = set()
+_recent_alerts_cache: dict[tuple[str, int], float] = {}
 
 def truncate_list_for_embed(items: list[str], max_chars: int = 1000) -> str:
     if not items:
@@ -155,10 +156,23 @@ async def forward_alert_if_configured(guild_id: int, text: str, card_io: BytesIO
 async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_fake: bool = False, custom_time: str = None):
     guild_id = monitor_data.get("guild_id", 0)
     username_key = (monitor_data["username"], guild_id)
+    now_m = time.monotonic()
+
     if not is_fake:
         if username_key in _alerting_keys:
             return
+        if username_key in _recent_alerts_cache and _recent_alerts_cache[username_key] > now_m:
+            logging.info(f"Duplicate unban alert suppressed for @{monitor_data.get('raw_username')} in guild {guild_id}")
+            return
         _alerting_keys.add(username_key)
+        _recent_alerts_cache[username_key] = now_m + 600.0  # 10 minutes lock
+
+        # Transition monitor status IMMEDIATELY in DB so subsequent worker batches never pick it up
+        try:
+            initial_uid = getattr(result, "user_id", None) or "pending"
+            database.transition_to_username_tracking(monitor_data["username"], guild_id, initial_uid, time.time())
+        except Exception as e:
+            logging.debug(f"Immediate DB transition error for @{monitor_data['username']}: {e}")
     try:
         raw_user = monitor_data["raw_username"]
         if custom_time:
@@ -233,10 +247,10 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
 
         now_ts = time.time()
         if not is_fake:
-            # Requirements 1 & 2: Fetch UID and start 24h tracking immediately!
+            # Requirements 1 & 2: Confirm UID and maintain 24h username tracking
             uid = getattr(result, "user_id", None)
             if not uid and profile_http_session and settings:
-                proxy = next(checker.proxies) if checker and checker.proxies else None
+                proxy = checker._get_proxy(checker.proxies) if checker and checker.proxies else None
                 try:
                     uid = await fetch_user_id_by_username(profile_http_session, proxy, raw_user)
                 except Exception as e:
@@ -244,9 +258,7 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
 
             if uid:
                 database.transition_to_username_tracking(monitor_data["username"], guild_id, uid, now_ts)
-                logging.info(f"Started 24h username tracking immediately for @{raw_user} (UID: {uid}, Guild: {guild_id})")
-            else:
-                database.remove_monitor(monitor_data["username"], guild_id)
+                logging.info(f"Confirmed 24h username tracking for @{raw_user} (UID: {uid}, Guild: {guild_id})")
 
             if settings.get("autoban"):
                 database.add_monitors([raw_user], "ban", guild_id, monitor_data.get("channel_id", 0), 0)
@@ -529,7 +541,7 @@ async def monitoring_worker():
             loop_start = time.monotonic()
             await asyncio.gather(*(process_active_monitor(r) for r in active_records))
             elapsed = time.monotonic() - loop_start
-            pause = max(1.5, 3.5 - elapsed)
+            pause = max(2.5, 4.5 - elapsed)
             await asyncio.sleep(pause)
 
         except Exception as e:

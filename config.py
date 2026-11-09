@@ -105,22 +105,12 @@ def _number(env, key, default, low, high, integer=False):
 
 
 ROTATING_RESIDENTIAL_PROXIES = (
-    # Webshare 80M+ Rotating Residential Pool (Plan 14809548)
-    "http://huezajafresidential-rotate:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-1:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-2:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-3:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-4:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-5:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-6:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-7:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-8:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-9:0lsun8mr921c@p.webshare.io:80",
-    "http://huezajafresidential-10:0lsun8mr921c@p.webshare.io:80",
+    # Disabled by default to protect user from metered data exhaustion (Webshare 1GB cap)
+    # Re-enable if user tops up quota on Webshare
 )
 
 RESIDENTIAL_PROXIES = (
-    # Webshare Fresh Static Residential Proxies (Plan 14809547 - High Reputation)
+    # Webshare Fresh Static Residential Proxies (Plan 14809547 - High Reputation - UNLIMITED BANDWIDTH)
     "http://huezajafstaticresidential:0lsun8mr921c@166.0.40.186:7194",
     "http://huezajafstaticresidential:0lsun8mr921c@195.40.128.32:6752",
     "http://huezajafstaticresidential:0lsun8mr921c@103.243.147.125:6104",
@@ -143,8 +133,8 @@ RESIDENTIAL_PROXIES = (
     "http://huezajafstaticresidential:0lsun8mr921c@166.0.43.151:5659",
 )
 
-BUILTIN_PROXIES = ROTATING_RESIDENTIAL_PROXIES + RESIDENTIAL_PROXIES + (
-    # Webshare Proxy Server Shared Proxies (Plan 14394551)
+BUILTIN_PROXIES = RESIDENTIAL_PROXIES + (
+    # Webshare Proxy Server Shared Proxies (Plan 14394551 - UNLIMITED BANDWIDTH)
     "http://huezajaf:0lsun8mr921c@185.171.254.141:6173",
     "http://huezajaf:0lsun8mr921c@185.226.205.139:5671",
     "http://huezajaf:0lsun8mr921c@82.24.238.234:7041",

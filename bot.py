@@ -37,6 +37,7 @@ checker: ProfileChecker | None = None
 profile_http_session = None
 dp = Dispatcher()
 _alerting_keys: set[tuple[str, int]] = set()
+_recent_alerts_cache: dict[tuple[str, int], float] = {}
 
 def format_elapsed(start_time: datetime) -> str:
     elapsed = datetime.now() - start_time
@@ -49,10 +50,22 @@ def format_elapsed(start_time: datetime) -> str:
 
 async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckResult, is_fake: bool = False, custom_time: str = None):
     username_key = (monitor_data["username"], chat_id)
+    now_m = time.monotonic()
     if not is_fake:
         if username_key in _alerting_keys:
             return
+        if username_key in _recent_alerts_cache and _recent_alerts_cache[username_key] > now_m:
+            logging.info(f"TG: Duplicate unban alert suppressed for @{monitor_data.get('raw_username')}")
+            return
         _alerting_keys.add(username_key)
+        _recent_alerts_cache[username_key] = now_m + 600.0  # 10 minutes lock
+
+        # Transition monitor status IMMEDIATELY in DB so subsequent worker batches never pick it up
+        try:
+            initial_uid = getattr(result, "user_id", None) or "pending"
+            database.transition_to_username_tracking(monitor_data["username"], chat_id, initial_uid, time.time())
+        except Exception as e:
+            logging.debug(f"TG immediate DB transition error: {e}")
     try:
         raw_user = monitor_data["raw_username"]
         if custom_time:
@@ -311,7 +324,7 @@ async def tg_monitoring_worker():
             loop_start = time.monotonic()
             await asyncio.gather(*(process_tg_monitor(r) for r in active_records))
             elapsed = time.monotonic() - loop_start
-            pause = max(1.5, 3.5 - elapsed)
+            pause = max(2.5, 4.5 - elapsed)
             await asyncio.sleep(pause)
 
         except Exception as e:

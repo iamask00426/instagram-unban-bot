@@ -352,7 +352,7 @@ class ProfileChecker:
         except Exception as e:
             err_str = str(e)
             if "402" in err_str or "Payment Required" in err_str:
-                self._mark_cooldown(proxy, 3600.0)
+                self._mark_cooldown(proxy, 86400.0)
             elif isinstance(e, (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError)):
                 self._mark_cooldown(proxy, 30.0)
             logging.debug(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
@@ -365,12 +365,12 @@ class ProfileChecker:
 
         result = None
 
-        # Tier 1: Routine checks on UNLIMITED Static Residential & Shared Proxies (Saves 1GB Rotating Quota!)
+        # Tier 1: Routine checks on UNLIMITED Static Residential & Shared Proxies
         p_primary = None
-        if self.residential_cycle:
-            p_primary = self._get_proxy(self.residential_cycle)
-        elif self.proxies:
+        if self.proxies:
             p_primary = self._get_proxy(self.proxies)
+        elif self.residential_cycle:
+            p_primary = self._get_proxy(self.residential_cycle)
 
         if p_primary:
             result = await self._execute_single_check(username, p_primary)
@@ -378,9 +378,9 @@ class ProfileChecker:
                 self.metrics.outcomes[result.status] += 1
                 return result
 
-        # Tier 2: Smart Fallback to Rotating Residential ONLY if static proxy was rate-limited, challenged, or timed out
-        # This ensures 99% of requests use $0 unlimited bandwidth and the 1GB quota lasts for months!
-        if self.rotating_cycle and (result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_")):
+        # Tier 2: Optional Fallback to Rotating Residential (ONLY if configured with active quota)
+        from config import ROTATING_RESIDENTIAL_PROXIES
+        if ROTATING_RESIDENTIAL_PROXIES and self.rotating_cycle and (result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_")):
             p_rot = self._get_proxy(self.rotating_cycle)
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)

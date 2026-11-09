@@ -208,12 +208,12 @@ def get_active_monitors(guild_id: int = None) -> list[dict]:
         cursor = conn.cursor()
         if guild_id:
             cursor.execute(
-                "SELECT * FROM monitors WHERE status != 'tracking_username' AND guild_id = ? ORDER BY created_at ASC",
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') AND guild_id = ? ORDER BY created_at ASC",
                 (guild_id,)
             )
         else:
             cursor.execute(
-                "SELECT * FROM monitors WHERE status != 'tracking_username' ORDER BY created_at ASC"
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at ASC"
             )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
