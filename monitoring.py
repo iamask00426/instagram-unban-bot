@@ -365,14 +365,17 @@ class ProfileChecker:
 
         result = None
 
-        # Tier 1: Routine checks on UNLIMITED Static Residential & Shared Proxies
-        p_primary = None
-        if self.proxies:
-            p_primary = self._get_proxy(self.proxies)
-        elif self.residential_cycle:
-            p_primary = self._get_proxy(self.residential_cycle)
+        # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
+        for _ in range(3):
+            p_primary = None
+            if self.proxies:
+                p_primary = self._get_proxy(self.proxies)
+            elif self.residential_cycle:
+                p_primary = self._get_proxy(self.residential_cycle)
 
-        if p_primary:
+            if not p_primary:
+                break
+
             result = await self._execute_single_check(username, p_primary)
             if result.status in {"active", "unavailable"}:
                 self.metrics.outcomes[result.status] += 1

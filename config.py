@@ -210,20 +210,25 @@ class Settings:
 
         if raw_proxies:
             for p in re.split(r"[,;\r\n]+", raw_proxies):
-                if p.strip():
+                if p.strip() and "elcmztak" not in p:
                     try:
                         parsed_proxies.append(parse_proxy_entry(p))
                     except Exception:
                         pass
 
-        # Ensure high-success Static Residential and Rotating Residential proxies are blended into pool
-        for rot_p in ROTATING_RESIDENTIAL_PROXIES:
-            if rot_p not in parsed_proxies:
-                parsed_proxies.append(rot_p)
+        # Prioritize 10 high-speed Unlimited Datacenter proxies, then 20 Static Residential proxies
+        dc_proxies = [p for p in BUILTIN_PROXIES if "huezajaf:" in p]
+        for dc_p in dc_proxies:
+            if dc_p not in parsed_proxies:
+                parsed_proxies.append(dc_p)
 
         for res_p in RESIDENTIAL_PROXIES:
             if res_p not in parsed_proxies:
                 parsed_proxies.append(res_p)
+
+        for rot_p in ROTATING_RESIDENTIAL_PROXIES:
+            if rot_p not in parsed_proxies:
+                parsed_proxies.append(rot_p)
 
         if not parsed_proxies:
             parsed_proxies = list(BUILTIN_PROXIES)
