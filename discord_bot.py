@@ -523,7 +523,7 @@ async def monitoring_worker():
             # e.g., 50 accounts -> 50s cycle (1.0s per account)
             # e.g., 100 accounts -> 60s cycle (0.6s per account)
             target_cycle_time = max(35.0, min(60.0, total_accounts * 0.6))
-            delay_per_account = target_cycle_time / total_accounts
+            delay_per_account = max(0.6, target_cycle_time / total_accounts)
 
             async def process_active_monitor(rec):
                 async with sem:
@@ -815,7 +815,8 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
                 timeout=aiohttp.ClientTimeout(total=1.5),
             ) as r:
                 if r.status == 200:
-                    return await r.text()
+                    raw = await r.content.read(64 * 1024)
+                    return raw.decode("utf-8", errors="ignore")
         except Exception:
             return None
 

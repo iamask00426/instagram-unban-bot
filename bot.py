@@ -24,7 +24,7 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-import database_async as database
+import database as database
 from config import Settings, parse_usernames
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
@@ -266,21 +266,24 @@ async def send_tg_username_change_alert(chat_id: int, old_name: str, new_name: s
     except Exception as e:
         logging.error(f"Failed delivering TG username change alert to {chat_id}: {e}")
 
+_instant_check_sem = asyncio.Semaphore(6)
+
 async def instant_check(chat_id: int, monitor_data: dict):
     if not checker:
         return
     username = monitor_data["username"]
     mode = monitor_data["mode"]
-    try:
-        res = await checker.check(username)
-        if mode == "unban" and res.status == "active":
-            await send_tg_unban_alert(chat_id, monitor_data, res)
-        elif mode == "ban" and res.status == "unavailable":
-            await send_tg_ban_alert(chat_id, monitor_data)
-        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-            await send_tg_tick_alert(chat_id, monitor_data, res)
-    except Exception as e:
-        logging.debug(f"TG instant check exception for @{username}: {e}")
+    async with _instant_check_sem:
+        try:
+            res = await checker.check(username, prefer_rotating=True)
+            if mode == "unban" and res.status == "active":
+                await send_tg_unban_alert(chat_id, monitor_data, res)
+            elif mode == "ban" and res.status == "unavailable":
+                await send_tg_ban_alert(chat_id, monitor_data)
+            elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                await send_tg_tick_alert(chat_id, monitor_data, res)
+        except Exception as e:
+            logging.debug(f"TG instant check exception for @{username}: {e}")
 
 # --- OPTIMIZED STREAMING MONITORING SYSTEM ---
 
@@ -567,8 +570,7 @@ async def clearall_cmd(message: types.Message):
 async def list_cmd(message: types.Message):
     args = (message.text or "").split(maxsplit=1)
     chat_id = message.chat.id
-    records = await database.get_all_monitors()
-    records = [r for r in records if r["guild_id"] == chat_id or r.get("channel_id") == chat_id]
+    records = await database.get_all_monitors(chat_id)
 
     if len(args) > 1:
         parsed = parse_usernames(args[1])

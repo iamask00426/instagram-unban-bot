@@ -3,6 +3,8 @@ Async SQLite database layer for high-performance non-blocking operations.
 Replaces blocking sqlite3 calls with aiosqlite for true async I/O.
 """
 import aiosqlite
+import asyncio
+from contextlib import asynccontextmanager
 import os
 import shutil
 import logging
@@ -39,9 +41,24 @@ def resolve_db_path() -> str:
 
 DB_PATH = resolve_db_path()
 
+_shared_conn = None
+_conn_lock = asyncio.Lock()
+
+@asynccontextmanager
+async def get_connection():
+    global _shared_conn
+    async with _conn_lock:
+        if _shared_conn is None:
+            _shared_conn = await get_connection()
+            await _shared_conn.execute("PRAGMA journal_mode = WAL")
+            await _shared_conn.execute("PRAGMA synchronous = NORMAL")
+            await _shared_conn.execute("PRAGMA busy_timeout = 30000")
+            _shared_conn.row_factory = aiosqlite.Row
+        yield _shared_conn
+
 async def init_db():
     """Initialize database schema with async operations."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.execute("PRAGMA synchronous = NORMAL")
         await conn.execute("PRAGMA busy_timeout = 30000")
@@ -129,7 +146,7 @@ async def add_monitors(usernames: List[str], mode: str, guild_id: int, channel_i
     """Add monitors with async batch insert."""
     added = []
     now = datetime.now()
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         for raw_name in usernames:
             clean = raw_name.strip()
             key = clean.lower()
@@ -155,7 +172,7 @@ async def remove_monitors(usernames: List[str], guild_id: Optional[int] = None) 
     """Remove monitors with async operations."""
     cleared = []
     not_monitored = []
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         for raw_name in usernames:
             clean = raw_name.strip()
             key = clean.lower()
@@ -181,7 +198,7 @@ async def remove_monitors(usernames: List[str], guild_id: Optional[int] = None) 
 
 async def remove_monitor(username: str, guild_id: Optional[int] = None):
     """Remove single monitor."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         if guild_id:
             await conn.execute("DELETE FROM monitors WHERE username = ? AND guild_id = ?", (username.lower(), guild_id))
         else:
@@ -190,7 +207,7 @@ async def remove_monitor(username: str, guild_id: Optional[int] = None):
 
 async def get_all_monitors(guild_id: Optional[int] = None) -> List[Dict]:
     """Get all monitors with async query."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         if guild_id:
             cursor = await conn.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at ASC", (guild_id,))
@@ -201,7 +218,7 @@ async def get_all_monitors(guild_id: Optional[int] = None) -> List[Dict]:
 
 async def get_active_monitors(guild_id: Optional[int] = None) -> List[Dict]:
     """Get only active monitors (non-tracking) - CRITICAL for performance."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         if guild_id:
             cursor = await conn.execute(
@@ -217,7 +234,7 @@ async def get_active_monitors(guild_id: Optional[int] = None) -> List[Dict]:
 
 async def clear_all_monitors(guild_id: int) -> int:
     """Clear all monitors for a guild."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         cursor = await conn.execute("DELETE FROM monitors WHERE guild_id = ?", (guild_id,))
         count = cursor.rowcount
         await conn.commit()
@@ -226,7 +243,7 @@ async def clear_all_monitors(guild_id: int) -> int:
 async def record_unban_stat(guild_id: int, username: str, raw_username: str):
     """Record unban event."""
     now = datetime.now()
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         await conn.execute("""
             INSERT INTO unban_history (guild_id, username, raw_username, unbanned_at)
             VALUES (?, ?, ?, ?)
@@ -235,7 +252,7 @@ async def record_unban_stat(guild_id: int, username: str, raw_username: str):
 
 async def get_unban_stats(guild_id: int, window_seconds: int) -> List[Dict]:
     """Get unban statistics."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("""
             SELECT * FROM unban_history
@@ -247,7 +264,7 @@ async def get_unban_stats(guild_id: int, window_seconds: int) -> List[Dict]:
 
 async def reset_unban_stats(guild_id: int, window_seconds: int) -> int:
     """Reset unban statistics."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         cursor = await conn.execute("""
             DELETE FROM unban_history
             WHERE guild_id = ? AND (strftime('%s', 'now') - strftime('%s', unbanned_at)) <= ?
@@ -261,7 +278,7 @@ async def set_server_setting(guild_id: int, key: str, value):
     valid_cols = {"unban_channel_id", "ban_channel_id", "tick_channel_id", "usernamechange_channel_id", "style", "autoban", "tg_bot_token", "tg_chat_id"}
     if key not in valid_cols:
         raise ValueError(f"Invalid server setting key: {key}")
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         await conn.execute("""
             INSERT INTO server_settings (guild_id)
             VALUES (?)
@@ -272,7 +289,7 @@ async def set_server_setting(guild_id: int, key: str, value):
 
 async def get_server_settings(guild_id: int) -> Dict:
     """Get server settings."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM server_settings WHERE guild_id = ?", (guild_id,))
         row = await cursor.fetchone()
@@ -295,7 +312,7 @@ async def transition_to_username_tracking(username: str, guild_id: int, user_id:
     import time
     if unbanned_at is None:
         unbanned_at = time.time()
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         await conn.execute("""
             UPDATE monitors
             SET status = 'tracking_username',
@@ -307,7 +324,7 @@ async def transition_to_username_tracking(username: str, guild_id: int, user_id:
 
 async def get_username_tracking_monitors() -> List[Dict]:
     """Get monitors in username tracking mode."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM monitors WHERE status = 'tracking_username' ORDER BY unbanned_at ASC")
         rows = await cursor.fetchall()
@@ -315,7 +332,7 @@ async def get_username_tracking_monitors() -> List[Dict]:
 
 async def update_tracked_username(old_username: str, new_username: str, guild_id: int):
     """Update tracked username after change detection."""
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         await conn.execute("""
             UPDATE monitors
             SET username = ?,
@@ -329,7 +346,7 @@ async def cleanup_expired_username_tracking(max_age_seconds: float = 86400) -> L
     import time
     now = time.time()
     expired = []
-    async with aiosqlite.connect(DB_PATH, timeout=30.0) as conn:
+    async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM monitors WHERE status = 'tracking_username'")
         rows = await cursor.fetchall()

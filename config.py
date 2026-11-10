@@ -12,54 +12,42 @@ from urllib.parse import quote, unquote, urlsplit
 USERNAME = re.compile(r"[a-zA-Z0-9_](?:[a-zA-Z0-9_.]{0,28}[a-zA-Z0-9_])?\Z")
 
 
-def extract_username(token: str) -> str | None:
-    if not token or not isinstance(token, str):
-        return None
-    token = token.strip()
-    if not token:
-        return None
-
-    # Strip surrounding markdown, brackets, quotes, angle brackets, punctuation
-    token = token.strip("<>\"'()[]{}.,;`")
-
-    lower_token = token.lower()
-    if "instagram.com/" in lower_token or "instagr.am/" in lower_token:
-        if not (lower_token.startswith("http://") or lower_token.startswith("https://")):
-            token = "https://" + token
-        try:
-            parsed = urlsplit(token)
-            path = parsed.path.strip("/")
-            parts = [p for p in path.split("/") if p]
-            if not parts:
-                return None
-            candidate = parts[0]
-            if candidate.lower() == "stories" and len(parts) > 1 and parts[1].lower() != "highlights":
-                candidate = parts[1]
-            elif candidate.lower() in {"p", "reel", "reels", "stories", "tv", "explore", "direct", "accounts", "about", "developer", "legal"}:
-                return None
-            token = candidate
-        except Exception:
-            return None
-
-    # Strip query/fragments and trailing/leading slashes
-    token = token.split("?")[0].split("&")[0].split("#")[0].strip("/")
-
-    # Strip leading @ or /
-    token = token.lstrip("@/").strip()
-    token = token.lower()
-
-    if re.fullmatch(r"[a-z0-9_.]{1,30}", token) and ".." not in token:
-        token = token.strip(".")
-        if token and re.fullmatch(r"[a-z0-9_.]{1,30}", token):
-            return token
-    return None
-
-
 def normalize_username(value: str) -> str:
-    cleaned = extract_username(value)
-    if not cleaned:
-        raise ValueError("Use a valid Instagram username or profile link.")
-    return cleaned
+    value = value.strip()
+    if value.startswith(("https://", "http://")):
+        url = urlsplit(value)
+        if (url.hostname not in {"instagram.com", "www.instagram.com"}
+                or url.netloc != url.hostname or url.query or url.fragment):
+            raise ValueError("Use a username or a plain Instagram profile URL.")
+        value = url.path.strip("/")
+    elif value.startswith(("instagram.com/", "www.instagram.com/")):
+        return normalize_username("https://" + value)
+    elif value.startswith("@"):
+        value = value[1:]
+    if not USERNAME.fullmatch(value) or ".." in value:
+        raise ValueError("Username must be 1–30 letters, digits, underscores or internal dots.")
+    return value.lower()
+
+
+def extract_username(token: str) -> str | None:
+    try:
+        return normalize_username(token)
+    except Exception:
+        return None
+
+
+def parse_usernames(raw_input: str) -> list[str]:
+    if not raw_input:
+        return []
+    tokens = re.split(r"[,;\s\r\n]+", raw_input)
+    results = []
+    seen = set()
+    for t in tokens:
+        u = extract_username(t)
+        if u and u not in seen:
+            seen.add(u)
+            results.append(u)
+    return results
 
 
 def is_example(value: str) -> bool:
@@ -79,6 +67,8 @@ def parse_proxy_entry(entry: str) -> str:
             host, port, user, password = parts
             entry = f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
         elif len(parts) == 2:
+            entry = "http://" + entry
+        elif "@" in entry and len(entry.rsplit("@", 1)) == 2:
             entry = "http://" + entry
         else:
             raise ValueError("Invalid PROXIES entry; use an HTTP(S) proxy URL.")
@@ -104,9 +94,13 @@ def _number(env, key, default, low, high, integer=False):
         raise ValueError(f"{key} must be between {low} and {high}.") from None
 
 
-DATAIMPULSE_PROXY = (
-    "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823"
-)
+import os
+
+_raw_dataimpulse = os.getenv("DATAIMPULSE_PROXY", "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823").strip()
+try:
+    DATAIMPULSE_PROXY = parse_proxy_entry(_raw_dataimpulse)
+except Exception:
+    DATAIMPULSE_PROXY = "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823"
 
 ROTATING_RESIDENTIAL_PROXIES = (
     # DataImpulse 90M+ Rotating Residential Pool ($1/GB - Lifetime Rollover)
@@ -172,8 +166,12 @@ class Settings:
     @classmethod
     def from_env(cls, env):
         token = env.get("BOT_TOKEN", "").strip()
-        if is_example(token) or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
-            token = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+        if not token or is_example(token) or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
+            dc_token = env.get("DISCORD_BOT_TOKEN", "").strip()
+            if dc_token and not is_example(dc_token):
+                token = "0000000000:DISCORD_ONLY_BOT_RUNNER_TOKEN"
+            else:
+                raise ValueError("BOT_TOKEN must be set to a valid Telegram bot token (or DISCORD_BOT_TOKEN configured).")
         raw_proxies = env.get("PROXIES", "").strip()
         download_url = env.get("WEBSHARE_DOWNLOAD_URL", "").strip()
         if raw_proxies.startswith("http://proxy.webshare.io") or raw_proxies.startswith("https://proxy.webshare.io"):
@@ -220,20 +218,16 @@ class Settings:
                     except Exception:
                         pass
 
-        # Prioritize 10 high-speed Unlimited Datacenter proxies, then 20 Static Residential proxies
-        dc_proxies = [p for p in BUILTIN_PROXIES if "huezajaf:" in p]
-        for dc_p in dc_proxies:
-            if dc_p not in parsed_proxies:
-                parsed_proxies.append(dc_p)
-
-        for res_p in RESIDENTIAL_PROXIES:
-            if res_p not in parsed_proxies:
-                parsed_proxies.append(res_p)
-
-        # Keep ROTATING_RESIDENTIAL_PROXIES (DataImpulse) separate for dedicated Tier 2 fallback / instant checks
+        elif not download_url:
+            dataimpulse_env = env.get("DATAIMPULSE_PROXY", "").strip() or DATAIMPULSE_PROXY
+            if dataimpulse_env and "BOT_TOKEN" not in env:
+                try:
+                    parsed_proxies.append(parse_proxy_entry(dataimpulse_env))
+                except Exception:
+                    pass
 
         if not parsed_proxies:
-            parsed_proxies = list(BUILTIN_PROXIES)
+            raise ValueError("PROXIES must be configured with at least one valid HTTP(S) proxy.")
 
         proxies = tuple(parsed_proxies)
         import logging

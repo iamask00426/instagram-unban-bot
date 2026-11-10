@@ -431,8 +431,8 @@ def profile_session(settings):
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
 
     conn_limit = max(100, settings.concurrency * 4)
     session = aiohttp.ClientSession(
@@ -620,7 +620,8 @@ async def fetch_user_id_by_username(session: aiohttp.ClientSession, proxy: str |
         async with session.get(url, headers=headers, proxy=proxy,
                                timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status == 200:
-                text = await resp.text()
+                raw = await resp.content.read(64 * 1024)
+                text = raw.decode("utf-8", errors="ignore")
                 m = re.search(r'[\"\'\\]*profile_id[\"\'\\]*[:=]\s*[\"\']?(\d{5,})[\"\']?', text)
                 if not m:
                     m = re.search(r'\"id\":\"(\d{5,})\"', text)
