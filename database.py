@@ -210,24 +210,24 @@ async def get_all_monitors(guild_id: Optional[int] = None) -> List[Dict]:
     async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         if guild_id:
-            cursor = await conn.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at ASC", (guild_id,))
+            cursor = await conn.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at DESC", (guild_id,))
         else:
-            cursor = await conn.execute("SELECT * FROM monitors ORDER BY created_at ASC")
+            cursor = await conn.execute("SELECT * FROM monitors ORDER BY created_at DESC")
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
 async def get_active_monitors(guild_id: Optional[int] = None) -> List[Dict]:
-    """Get only active monitors (non-tracking) - CRITICAL for performance."""
+    """Get only active monitors (non-tracking) — newest additions prioritized first."""
     async with get_connection() as conn:
         conn.row_factory = aiosqlite.Row
         if guild_id:
             cursor = await conn.execute(
-                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') AND guild_id = ? ORDER BY created_at ASC",
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') AND guild_id = ? ORDER BY created_at DESC",
                 (guild_id,)
             )
         else:
             cursor = await conn.execute(
-                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at ASC"
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at DESC"
             )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

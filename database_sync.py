@@ -196,24 +196,24 @@ def get_all_monitors(guild_id: int = None) -> list[dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
         if guild_id:
-            cursor.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at ASC", (guild_id,))
+            cursor.execute("SELECT * FROM monitors WHERE guild_id = ? ORDER BY created_at DESC", (guild_id,))
         else:
-            cursor.execute("SELECT * FROM monitors ORDER BY created_at ASC")
+            cursor.execute("SELECT * FROM monitors ORDER BY created_at DESC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
 def get_active_monitors(guild_id: int = None) -> list[dict]:
-    """Return only monitors with status != 'tracking_username' — filtered in SQL."""
+    """Return only monitors with status != 'tracking_username' — newest additions prioritized first."""
     with get_connection() as conn:
         cursor = conn.cursor()
         if guild_id:
             cursor.execute(
-                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') AND guild_id = ? ORDER BY created_at ASC",
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') AND guild_id = ? ORDER BY created_at DESC",
                 (guild_id,)
             )
         else:
             cursor.execute(
-                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at ASC"
+                "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at DESC"
             )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]

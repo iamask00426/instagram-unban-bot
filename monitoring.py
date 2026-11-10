@@ -284,8 +284,13 @@ class ProfileChecker:
         self._proxy_cooldowns = {}
 
     def _mark_cooldown(self, proxy: str | None, seconds: float = 60.0):
-        if proxy:
-            self._proxy_cooldowns[proxy] = time.monotonic() + seconds
+        if not proxy:
+            return
+        # Never cooldown rotating residential proxies — every connection is already a brand new residential IP!
+        from config import ROTATING_RESIDENTIAL_PROXIES
+        if proxy in ROTATING_RESIDENTIAL_PROXIES:
+            return
+        self._proxy_cooldowns[proxy] = time.monotonic() + seconds
 
     def _cleanup_cooldowns(self):
         now = time.monotonic()
@@ -302,7 +307,7 @@ class ProfileChecker:
                 return p
         return next(cycle_iter)
 
-    async def _execute_single_check(self, username, proxy):
+    async def _execute_single_check(self, username, proxy, timeout_sec: float = 5.0):
         headers = {
             "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
             "Accept-Language": "en-US,en;q=0.9",
@@ -317,7 +322,6 @@ class ProfileChecker:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
         try:
-            timeout_sec = 5.0
             async with self.session.get(
                 url, headers=headers, proxy=proxy, allow_redirects=False,
                 auto_decompress=False, timeout=aiohttp.ClientTimeout(total=timeout_sec),
@@ -365,14 +369,15 @@ class ProfileChecker:
 
         result = None
 
-        # Tier 0: Instant Check Priority with DataImpulse Rotating Residential (Fastest & 100% Reliable)
+        # Tier 0: Instant Check Priority with DataImpulse Rotating Residential (Fastest & 100% Reliable, 2 quick attempts)
         if prefer_rotating and self.rotating_cycle:
-            p_rot = self._get_proxy(self.rotating_cycle)
-            if p_rot:
-                rot_res = await self._execute_single_check(username, p_rot)
-                if rot_res.status in {"active", "unavailable"}:
-                    self.metrics.outcomes[rot_res.status] += 1
-                    return rot_res
+            for _ in range(2):
+                p_rot = self._get_proxy(self.rotating_cycle)
+                if p_rot:
+                    rot_res = await self._execute_single_check(username, p_rot, timeout_sec=2.8)
+                    if rot_res.status in {"active", "unavailable"}:
+                        self.metrics.outcomes[rot_res.status] += 1
+                        return rot_res
 
         # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
         proxy_attempts = 1 if (self.proxies or self.residential_cycle) else 0

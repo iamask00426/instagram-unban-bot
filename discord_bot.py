@@ -645,6 +645,9 @@ async def unban_command(ctx, *, raw_input: str = None):
     await ctx.send(embed=embed)
 
     for u in added:
+        k = (u.lower(), guild_id)
+        _alerting_keys.discard(k)
+        _recent_alerts_cache.pop(k, None)
         mon_rec = {
             "username": u.lower(),
             "raw_username": u,
@@ -676,6 +679,9 @@ async def ban_command(ctx, *, raw_input: str = None):
     await ctx.send(embed=embed)
 
     for u in added:
+        k = (u.lower(), guild_id)
+        _alerting_keys.discard(k)
+        _recent_alerts_cache.pop(k, None)
         mon_rec = {
             "username": u.lower(),
             "raw_username": u,
@@ -707,6 +713,9 @@ async def tick_command(ctx, *, raw_input: str = None):
     await ctx.send(embed=embed)
 
     for u in added:
+        k = (u.lower(), guild_id)
+        _alerting_keys.discard(k)
+        _recent_alerts_cache.pop(k, None)
         mon_rec = {
             "username": u.lower(),
             "raw_username": u,
