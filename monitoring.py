@@ -359,14 +359,23 @@ class ProfileChecker:
             result = CheckResult(f"error_{type(e).__name__}")
         return result
 
-    async def check(self, username):
+    async def check(self, username, prefer_rotating: bool = False):
         username = normalize_username(username)
         self._cleanup_cooldowns()
 
         result = None
 
+        # Tier 0: Instant Check Priority with DataImpulse Rotating Residential (Fastest & 100% Reliable)
+        if prefer_rotating and self.rotating_cycle:
+            p_rot = self._get_proxy(self.rotating_cycle)
+            if p_rot:
+                rot_res = await self._execute_single_check(username, p_rot)
+                if rot_res.status in {"active", "unavailable"}:
+                    self.metrics.outcomes[rot_res.status] += 1
+                    return rot_res
+
         # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
-        proxy_attempts = 2 if (self.proxies or self.residential_cycle) else 0
+        proxy_attempts = 1 if (self.proxies or self.residential_cycle) else 0
         for _ in range(proxy_attempts):
             p_primary = None
             if self.proxies:
@@ -382,7 +391,7 @@ class ProfileChecker:
                 self.metrics.outcomes[result.status] += 1
                 return result
 
-        # Tier 2: Optional Fallback to Rotating Residential (ONLY if configured with active quota)
+        # Tier 2: Rotating Residential Fallback (DataImpulse 90M+ Pool)
         from config import ROTATING_RESIDENTIAL_PROXIES
         if ROTATING_RESIDENTIAL_PROXIES and self.rotating_cycle and (result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_")):
             p_rot = self._get_proxy(self.rotating_cycle)
@@ -395,8 +404,7 @@ class ProfileChecker:
                     result = rot_res
 
         # Tier 3: Direct Connection Fallback
-        # If proxies are rate-limited (302 is_from_rle login redirect) or errored out,
-        # execute a clean direct check so monitoring never goes blind or misses alerts.
+        # If proxies are rate-limited or errored out, clean direct check so alerts are NEVER dropped.
         if result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_") or result.status.startswith("HTTP_"):
             try:
                 direct_res = await self._execute_single_check(username, None)

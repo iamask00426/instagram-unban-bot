@@ -104,9 +104,13 @@ def _number(env, key, default, low, high, integer=False):
         raise ValueError(f"{key} must be between {low} and {high}.") from None
 
 
+DATAIMPULSE_PROXY = (
+    "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823"
+)
+
 ROTATING_RESIDENTIAL_PROXIES = (
-    # Disabled by default to protect user from metered data exhaustion (Webshare 1GB cap)
-    # Re-enable if user tops up quota on Webshare
+    # DataImpulse 90M+ Rotating Residential Pool ($1/GB - Lifetime Rollover)
+    DATAIMPULSE_PROXY,
 )
 
 RESIDENTIAL_PROXIES = (
@@ -226,9 +230,7 @@ class Settings:
             if res_p not in parsed_proxies:
                 parsed_proxies.append(res_p)
 
-        for rot_p in ROTATING_RESIDENTIAL_PROXIES:
-            if rot_p not in parsed_proxies:
-                parsed_proxies.append(rot_p)
+        # Keep ROTATING_RESIDENTIAL_PROXIES (DataImpulse) separate for dedicated Tier 2 fallback / instant checks
 
         if not parsed_proxies:
             parsed_proxies = list(BUILTIN_PROXIES)

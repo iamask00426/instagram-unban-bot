@@ -208,7 +208,12 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
         is_verified = getattr(result, "is_verified", False)
         card_io = None
         card_proxy = None
-        if checker and hasattr(checker, "proxies") and checker.proxies:
+        if checker and hasattr(checker, "rotating_cycle") and checker.rotating_cycle:
+            try:
+                card_proxy = checker._get_proxy(checker.rotating_cycle)
+            except Exception:
+                pass
+        elif checker and hasattr(checker, "proxies") and checker.proxies:
             try:
                 card_proxy = checker._get_proxy(checker.proxies)
             except Exception:
@@ -431,7 +436,7 @@ async def instant_check(guild: discord.Guild, monitor_data: dict):
     mode = monitor_data["mode"]
     async with _instant_check_sem:
         try:
-            res = await checker.check(username)
+            res = await checker.check(username, prefer_rotating=True)
             if mode == "unban" and res.status == "active":
                 if not res.followers or res.followers == "?":
                     try:
@@ -814,7 +819,8 @@ async def resolve_instagram_profile_data(username: str, checker: ProfileChecker 
         except Exception:
             return None
 
-    tasks = [_fetch_res_profile(p) for p in [None] + RESIDENTIAL_PROXIES]
+    from config import ROTATING_RESIDENTIAL_PROXIES
+    tasks = [_fetch_res_profile(p) for p in list(ROTATING_RESIDENTIAL_PROXIES) + [None] + list(RESIDENTIAL_PROXIES)]
     for coro in asyncio.as_completed(tasks):
         html_text = await coro
         if html_text:
