@@ -25,17 +25,19 @@ def main():
     if dc_token:
         os.environ["DISCORD_BOT_TOKEN"] = dc_token
 
-    # Telegram bot disabled per user request
-    has_tg = False
+    has_tg = bool(tg_token and not tg_token.startswith("your_") and ":" in tg_token)
     has_dc = bool(dc_token and not dc_token.startswith("your_"))
 
-    logging.info(f"Environment check -> DISCORD_BOT_TOKEN: {'Configured (' + str(len(dc_token)) + ' chars)' if has_dc else 'Missing/Placeholder'}")
+    logging.info(
+        f"Environment check -> BOT_TOKEN: {'Configured (' + str(len(tg_token)) + ' chars)' if has_tg else 'Disabled/Missing'}, "
+        f"DISCORD_BOT_TOKEN: {'Configured (' + str(len(dc_token)) + ' chars)' if has_dc else 'Disabled/Missing'}"
+    )
 
-    # Telegram Bot - DISABLED (only Discord bot will run)
-    # if has_tg:
-    #     logging.info("Starting Telegram Bot (bot.py)...")
-    #     p_tg = subprocess.Popen([sys.executable, "bot.py"])
-    #     procs.append({"name": "Telegram Bot", "proc": p_tg, "script": "bot.py", "restarts": 0, "last_start": time.time()})
+    # Telegram Bot
+    if has_tg:
+        logging.info("Starting Telegram Bot (bot.py)...")
+        p_tg = subprocess.Popen([sys.executable, "bot.py"])
+        procs.append({"name": "Telegram Bot", "proc": p_tg, "script": "bot.py", "restarts": 0, "last_start": time.time()})
 
     # Discord Bot
     if has_dc:
@@ -44,8 +46,8 @@ def main():
         procs.append({"name": "Discord Bot", "proc": p_dc, "script": "discord_bot.py", "restarts": 0, "last_start": time.time()})
 
     if not procs:
-        logging.error("No valid bot tokens configured (DISCORD_BOT_TOKEN).")
-        logging.error("Please add DISCORD_BOT_TOKEN in Railway service Variables tab.")
+        logging.error("No valid bot tokens configured (BOT_TOKEN or DISCORD_BOT_TOKEN).")
+        logging.error("Please add BOT_TOKEN or DISCORD_BOT_TOKEN in environment variables.")
         time.sleep(10)
         sys.exit(1)
 

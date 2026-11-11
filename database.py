@@ -49,7 +49,7 @@ async def get_connection():
     global _shared_conn
     async with _conn_lock:
         if _shared_conn is None:
-            _shared_conn = await get_connection()
+            _shared_conn = await aiosqlite.connect(DB_PATH)
             await _shared_conn.execute("PRAGMA journal_mode = WAL")
             await _shared_conn.execute("PRAGMA synchronous = NORMAL")
             await _shared_conn.execute("PRAGMA busy_timeout = 30000")
