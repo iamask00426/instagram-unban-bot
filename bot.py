@@ -1019,9 +1019,15 @@ async def main():
     global bot, checker, profile_http_session
     database.init_db()
 
-    token = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
+    token = (
+        os.getenv("BOT_TOKEN") or
+        os.getenv("TELEGRAMBOT") or
+        os.getenv("TELEGRAM_BOT_TOKEN") or
+        os.getenv("TG_BOT_TOKEN") or
+        ""
+    ).strip().strip('"').strip("'")
     if not token or token.startswith("your_"):
-        logging.error("BOT_TOKEN is missing or placeholder! Please set it in your environment variables.")
+        logging.error("BOT_TOKEN / TELEGRAMBOT is missing or placeholder! Please set it in your environment variables.")
         return
 
     env_dict = dict(os.environ)

@@ -13,7 +13,13 @@ def main():
     procs = []
 
     # Clean and unquote tokens in case quotes were passed
-    raw_tg = os.getenv("BOT_TOKEN", "").strip()
+    raw_tg = (
+        os.getenv("BOT_TOKEN") or
+        os.getenv("TELEGRAMBOT") or
+        os.getenv("TELEGRAM_BOT_TOKEN") or
+        os.getenv("TG_BOT_TOKEN") or
+        ""
+    ).strip()
     raw_dc = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 
     tg_token = raw_tg.strip('"').strip("'").strip()

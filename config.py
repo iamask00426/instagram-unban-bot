@@ -165,7 +165,13 @@ class Settings:
 
     @classmethod
     def from_env(cls, env):
-        token = env.get("BOT_TOKEN", "").strip()
+        token = (
+            env.get("BOT_TOKEN") or
+            env.get("TELEGRAMBOT") or
+            env.get("TELEGRAM_BOT_TOKEN") or
+            env.get("TG_BOT_TOKEN") or
+            ""
+        ).strip()
         if not token or is_example(token) or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", token):
             dc_token = env.get("DISCORD_BOT_TOKEN", "").strip()
             if dc_token and not is_example(dc_token):
