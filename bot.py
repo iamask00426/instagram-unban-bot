@@ -1049,6 +1049,7 @@ async def main():
 
     logging.info("🚀 Paced Telegram Monitoring Bot initialized & running!")
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         if profile_http_session:
