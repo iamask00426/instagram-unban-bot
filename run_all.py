@@ -59,6 +59,19 @@ def main():
 
     logging.info(f"Runner active with {len(procs)} service(s). Monitoring health every 3s...")
 
+    def shutdown(signum=None, frame=None):
+        logging.info("Stopping all child bot processes...")
+        for item in procs:
+            try:
+                item["proc"].terminate()
+            except Exception:
+                pass
+        sys.exit(0)
+
+    import signal
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
     try:
         while True:
             time.sleep(3)
@@ -78,9 +91,7 @@ def main():
                     item["last_start"] = time.time()
                     logging.info(f"[{item['name']}] restarted (PID: {item['proc'].pid})")
     except KeyboardInterrupt:
-        logging.info("Stopping all services...")
-        for item in procs:
-            item["proc"].terminate()
+        shutdown()
 
 if __name__ == "__main__":
     main()
