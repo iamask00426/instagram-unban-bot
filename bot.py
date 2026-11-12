@@ -1013,6 +1013,34 @@ async def ping_cmd(message: types.Message):
     latency = int((time.time() - start) * 1000)
     await msg.edit_text(f"🏓 <b>Pong!</b> Latency: <code>{latency}ms</code>. Bot is fully operational.", parse_mode=ParseMode.HTML)
 
+@dp.message(Command("proxies", "proxy", "proxystats"))
+async def proxies_cmd(message: types.Message):
+    if not checker:
+        return await message.answer("⚠️ Checker is not initialized yet.")
+    stats = checker.get_proxy_stats()
+    total = stats["total"]
+    ws_req = stats["webshare_requests"]
+    ws_pct = stats["webshare_pct"]
+    di_req = stats["dataimpulse_requests"]
+    di_pct = stats["dataimpulse_pct"]
+    dir_req = stats["direct_requests"]
+    dir_pct = stats["direct_pct"]
+
+    text = (
+        "📊 <b>Live Proxy Usage Distribution</b>\n\n"
+        f"<b>Total Checks:</b> <code>{total:,}</code>\n\n"
+        f"⚡ <b>Webshare (Static/Shared Proxies):</b>\n"
+        f"• Requests: <code>{ws_req:,}</code> (<b>{ws_pct:.1f}%</b>)\n"
+        f"• <i>Routine monitoring checks (Unlimited bandwidth)</i>\n\n"
+        f"🔥 <b>DataImpulse (Rotating Residential):</b>\n"
+        f"• Requests: <code>{di_req:,}</code> (<b>{di_pct:.1f}%</b>)\n"
+        f"• <i>Instant checks & challenge failovers</i>\n\n"
+    )
+    if dir_req > 0:
+        text += f"🌐 <b>Direct Connection (Fallback):</b>\n• Requests: <code>{dir_req:,}</code> (<b>{dir_pct:.1f}%</b>)\n\n"
+    text += "<i>💡 DataImpulse bandwidth is strictly conserved for instant checks & failovers.</i>"
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
 # --- MAIN RUNNER ---
 
 async def main():

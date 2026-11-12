@@ -46,6 +46,9 @@ class Metrics:
     outcomes: Counter = field(default_factory=Counter)
     consumed_body_bytes: int = 0  # decompressed, passed to the parser
     encoded_body_bytes: int = 0  # read from aiohttp's raw content stream
+    webshare_requests: int = 0
+    dataimpulse_requests: int = 0
+    direct_requests: int = 0
 
 
 def format_num(count):
@@ -321,6 +324,12 @@ class ProfileChecker:
         else:
             headers["Accept"] = "text/html"
         self.metrics.request_attempts += 1
+        if proxy is None:
+            self.metrics.direct_requests += 1
+        elif "dataimpulse" in proxy.lower():
+            self.metrics.dataimpulse_requests += 1
+        else:
+            self.metrics.webshare_requests += 1
         try:
             async with self.session.get(
                 url, headers=headers, proxy=proxy, allow_redirects=False,
@@ -426,6 +435,21 @@ class ProfileChecker:
 
         self.metrics.outcomes[result.status] += 1
         return result
+
+    def get_proxy_stats(self) -> dict:
+        total = self.metrics.webshare_requests + self.metrics.dataimpulse_requests + self.metrics.direct_requests
+        ws_pct = (self.metrics.webshare_requests / total * 100) if total > 0 else 0.0
+        di_pct = (self.metrics.dataimpulse_requests / total * 100) if total > 0 else 0.0
+        dir_pct = (self.metrics.direct_requests / total * 100) if total > 0 else 0.0
+        return {
+            "total": total,
+            "webshare_requests": self.metrics.webshare_requests,
+            "webshare_pct": ws_pct,
+            "dataimpulse_requests": self.metrics.dataimpulse_requests,
+            "dataimpulse_pct": di_pct,
+            "direct_requests": self.metrics.direct_requests,
+            "direct_pct": dir_pct,
+        }
 
 
 

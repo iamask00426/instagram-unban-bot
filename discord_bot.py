@@ -1080,6 +1080,43 @@ async def ping_command(ctx):
     latency = round(bot.latency * 1000)
     await ctx.send(f"🏓 Pong! Latency: `{latency}ms`")
 
+@bot.command(name="proxies", aliases=["proxy", "proxystats"])
+async def proxies_command(ctx):
+    if not checker:
+        return await ctx.send("⚠️ Checker is not initialized yet.")
+    stats = checker.get_proxy_stats()
+    total = stats["total"]
+    ws_req = stats["webshare_requests"]
+    ws_pct = stats["webshare_pct"]
+    di_req = stats["dataimpulse_requests"]
+    di_pct = stats["dataimpulse_pct"]
+    dir_req = stats["direct_requests"]
+    dir_pct = stats["direct_pct"]
+
+    embed = discord.Embed(
+        title="📊 Live Proxy Usage Distribution",
+        description=f"Total Checks Executed: **{total:,}**",
+        color=0x2b2d31
+    )
+    embed.add_field(
+        name="⚡ Webshare (Static/Shared Tier 1)",
+        value=f"• Requests: **{ws_req:,}**\n• Usage: **{ws_pct:.1f}%**\n• *Routine monitoring queue (unlimited)*",
+        inline=False
+    )
+    embed.add_field(
+        name="🔥 DataImpulse (Rotating Residential Tier 2 & Tier 0)",
+        value=f"• Requests: **{di_req:,}**\n• Usage: **{di_pct:.1f}%**\n• *Instant checks & challenge failovers*",
+        inline=False
+    )
+    if dir_req > 0:
+        embed.add_field(
+            name="🌐 Direct Connection (Tier 3 Fallback)",
+            value=f"• Requests: **{dir_req:,}**\n• Usage: **{dir_pct:.1f}%**",
+            inline=False
+        )
+    embed.set_footer(text="DataImpulse bandwidth is strictly conserved for instant checks & failovers.")
+    await ctx.send(embed=embed)
+
 async def display_unban_stats(ctx, window_seconds: int, window_label: str):
     if not ctx.guild:
         return await ctx.send("❌ This command must be used within a server.")
