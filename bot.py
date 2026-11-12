@@ -85,7 +85,7 @@ async def resolve_instagram_profile_data(username: str, checker_inst: ProfileChe
             async with sess.get(
                 f"https://www.instagram.com/{target_clean}/",
                 headers=m_headers, proxy=res_p, allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=1.8),
+                timeout=aiohttp.ClientTimeout(total=3.0),
             ) as r:
                 if r.status == 200:
                     raw = await r.content.read(64 * 1024)
@@ -415,7 +415,7 @@ async def instant_check(chat_id: int, monitor_data: dict):
             if mode == "unban" and res.status == "active":
                 if not res.followers or res.followers == "?":
                     try:
-                        prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=1.8)
+                        prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=3.5)
                         if prof_data.get("followers"):
                             res.followers = prof_data["followers"]
                         if prof_data.get("following"):
@@ -443,7 +443,7 @@ async def instant_check(chat_id: int, monitor_data: dict):
 async def monitoring_worker():
     """Background monitoring loop that continuously cycles through stored accounts with smooth pacing (0 burst spikes)."""
     logging.info("🚀 TG monitoring loop worker started.")
-    sem = asyncio.Semaphore(12)
+    sem = asyncio.Semaphore(16)
     last_tracking_check = 0.0
     last_cleanup_check = 0.0
 
@@ -490,8 +490,9 @@ async def monitoring_worker():
                 await asyncio.sleep(2.0)
                 continue
 
-            target_cycle_time = max(35.0, min(60.0, total_accounts * 0.6))
-            delay_per_account = max(0.6, target_cycle_time / total_accounts)
+            # Optimized rapid cycle across 12-25s target window (100 accounts finish in ~15-20s)
+            target_cycle_time = max(12.0, min(25.0, total_accounts * 0.15))
+            delay_per_account = max(0.10, target_cycle_time / total_accounts)
 
             async def process_active_monitor(rec):
                 async with sem:
@@ -504,7 +505,7 @@ async def monitoring_worker():
                         if mode == "unban" and res.status == "active":
                             if not res.followers or res.followers == "?":
                                 try:
-                                    prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=1.8)
+                                    prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=3.5)
                                     if prof_data.get("followers"):
                                         res.followers = prof_data["followers"]
                                     if prof_data.get("following"):

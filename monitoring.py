@@ -310,7 +310,7 @@ class ProfileChecker:
                 return p
         return next(cycle_iter)
 
-    async def _execute_single_check(self, username, proxy, timeout_sec: float = 5.0):
+    async def _execute_single_check(self, username, proxy, timeout_sec: float = 6.0):
         headers = {
             "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
             "Accept-Language": "en-US,en;q=0.9",
@@ -383,7 +383,7 @@ class ProfileChecker:
             for _ in range(2):
                 p_rot = self._get_proxy(self.rotating_cycle)
                 if p_rot:
-                    rot_res = await self._execute_single_check(username, p_rot, timeout_sec=2.8)
+                    rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
                     if rot_res.status in {"active", "unavailable"}:
                         self.metrics.outcomes[rot_res.status] += 1
                         return rot_res
