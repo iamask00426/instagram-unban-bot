@@ -28,6 +28,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 import database_sync as database
+from scheduling import TierScheduler
 from config import Settings, parse_usernames, RESIDENTIAL_PROXIES, ROTATING_RESIDENTIAL_PROXIES
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
@@ -41,6 +42,7 @@ logging.basicConfig(
 
 bot: Bot | None = None
 checker: ProfileChecker | None = None
+sched = TierScheduler()
 profile_http_session: aiohttp.ClientSession | None = None
 dp = Dispatcher()
 
@@ -444,6 +446,8 @@ async def monitoring_worker():
     """Background monitoring loop that continuously cycles through stored accounts with smooth pacing (0 burst spikes)."""
     logging.info("🚀 TG monitoring loop worker started.")
     sem = asyncio.Semaphore(16)
+    now_cache = None
+    active_cache = []
     last_tracking_check = 0.0
     last_cleanup_check = 0.0
 
@@ -483,17 +487,13 @@ async def monitoring_worker():
                 if tracking_records:
                     await asyncio.gather(*(_check_tracking(r) for r in tracking_records), return_exceptions=True)
 
-            # 3. Regular active unban/ban/tick monitors (Paced Queue Engine for 100+ accounts)
-            active_records = database.get_active_monitors()
-            total_accounts = len(active_records)
-            if not total_accounts:
+            # 3. Active monitors: two-tier cadence (new accounts fast, old accounts slow)
+            if now_cache is None or time.monotonic() - now_cache > 5.0:
+                now_cache = time.monotonic()
+                active_cache = database.get_active_monitors()
+            if not active_cache:
                 await asyncio.sleep(2.0)
                 continue
-
-            # 60s cycle: each account checked once per minute to conserve DataImpulse bandwidth
-            # e.g., 10 accounts -> 60s cycle (6.0s gap), 100 accounts -> 60s cycle (0.6s gap)
-            target_cycle_time = 60.0
-            delay_per_account = max(0.5, target_cycle_time / total_accounts)
 
             async def process_active_monitor(rec):
                 async with sem:
@@ -503,6 +503,7 @@ async def monitoring_worker():
 
                     try:
                         res = await checker.check(username)
+                        sched.record_outcome(getattr(res, 'status', None))
                         if mode == "unban" and res.status == "active":
                             if not res.followers or res.followers == "?":
                                 try:
@@ -529,15 +530,9 @@ async def monitoring_worker():
                     except Exception as e:
                         logging.debug(f"TG error checking @{username}: {e}")
 
-            # Process accounts in smooth paced cadence
-            tasks = []
-            for rec in active_records:
-                t = asyncio.create_task(process_active_monitor(rec))
-                tasks.append(t)
-                await asyncio.sleep(delay_per_account)
-
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            for rec in sched.due(active_cache):
+                asyncio.create_task(process_active_monitor(rec))
+            await asyncio.sleep(1.0)
 
         except Exception as e:
             logging.error(f"Unexpected error in TG monitor worker: {e}")
@@ -1014,6 +1009,10 @@ async def ping_cmd(message: types.Message):
     msg = await message.answer("🏓 Pinging...")
     latency = int((time.time() - start) * 1000)
     await msg.edit_text(f"🏓 <b>Pong!</b> Latency: <code>{latency}ms</code>. Bot is fully operational.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("health"))
+async def health_cmd(message: types.Message):
+    await message.answer(sched.health_text())
 
 @dp.message(Command("proxies", "proxy", "proxystats"))
 async def proxies_cmd(message: types.Message):
