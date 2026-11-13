@@ -406,8 +406,9 @@ class ProfileChecker:
                 return result
 
         # Tier 2: Rotating Residential Fallback (DataImpulse 90M+ Pool)
+        # STRICT: Only use DataImpulse when Webshare explicitly rate-limited (never on unknown/generic errors)
         from config import ROTATING_RESIDENTIAL_PROXIES
-        if ROTATING_RESIDENTIAL_PROXIES and self.rotating_cycle and (result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_")):
+        if ROTATING_RESIDENTIAL_PROXIES and self.rotating_cycle and result is not None and result.status == "rate_limited":
             p_rot = self._get_proxy(self.rotating_cycle)
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)

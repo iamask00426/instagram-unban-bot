@@ -490,9 +490,10 @@ async def monitoring_worker():
                 await asyncio.sleep(2.0)
                 continue
 
-            # Optimized rapid cycle across 12-25s target window (100 accounts finish in ~15-20s)
-            target_cycle_time = max(12.0, min(25.0, total_accounts * 0.15))
-            delay_per_account = max(0.10, target_cycle_time / total_accounts)
+            # 60s cycle: each account checked once per minute to conserve DataImpulse bandwidth
+            # e.g., 10 accounts -> 60s cycle (6.0s gap), 100 accounts -> 60s cycle (0.6s gap)
+            target_cycle_time = 60.0
+            delay_per_account = max(0.5, target_cycle_time / total_accounts)
 
             async def process_active_monitor(rec):
                 async with sem:
