@@ -377,6 +377,7 @@ class ProfileChecker:
         self._cleanup_cooldowns()
 
         result = None
+        trail = []  # (tier, status) of every attempt, logged if the final result is inconclusive
 
         # Tier 0: Instant Check Priority with DataImpulse Rotating Residential (Fastest & 100% Reliable, 2 quick attempts)
         if prefer_rotating and self.rotating_cycle:
@@ -384,6 +385,7 @@ class ProfileChecker:
                 p_rot = self._get_proxy(self.rotating_cycle)
                 if p_rot:
                     rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
+                    trail.append(("T0-DI", rot_res.status))
                     if rot_res.status in {"active", "unavailable"}:
                         self.metrics.outcomes[rot_res.status] += 1
                         return rot_res
@@ -401,6 +403,7 @@ class ProfileChecker:
                 break
 
             result = await self._execute_single_check(username, p_primary)
+            trail.append(("T1-static", result.status))
             if result.status in {"active", "unavailable"}:
                 self.metrics.outcomes[result.status] += 1
                 return result
@@ -412,6 +415,7 @@ class ProfileChecker:
             p_rot = self._get_proxy(self.rotating_cycle)
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)
+                trail.append(("T2-DI", rot_res.status))
                 if rot_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[rot_res.status] += 1
                     return rot_res
@@ -423,6 +427,7 @@ class ProfileChecker:
         if result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_") or result.status.startswith("HTTP_"):
             try:
                 direct_res = await self._execute_single_check(username, None)
+                trail.append(("T3-direct", direct_res.status))
                 if direct_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[direct_res.status] += 1
                     return direct_res
@@ -435,6 +440,7 @@ class ProfileChecker:
             result = CheckResult("unknown")
 
         self.metrics.outcomes[result.status] += 1
+        logging.info("CHECK inconclusive @%s: %s", username, ", ".join(f"{t}={st}" for t, st in trail) or result.status)
         return result
 
     def get_proxy_stats(self) -> dict:

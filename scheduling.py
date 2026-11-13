@@ -11,6 +11,8 @@ from datetime import datetime
 FAST_S = float(os.getenv("FAST_INTERVAL_SECONDS", 60))
 SLOW_S = float(os.getenv("SLOW_INTERVAL_SECONDS", 120))
 FAST_WINDOW_H = float(os.getenv("FAST_WINDOW_HOURS", 168))
+RETRY_S = float(os.getenv("RETRY_INTERVAL_SECONDS", 15))
+RETRY_MAX = int(os.getenv("RETRY_MAX_CONSECUTIVE", 3))
 
 
 def _age_hours(rec: dict) -> float:
@@ -28,6 +30,7 @@ def _age_hours(rec: dict) -> float:
 class TierScheduler:
     def __init__(self):
         self.last_checked: dict[tuple, float] = {}
+        self.retries: dict[tuple, int] = {}
         self.outcomes: deque = deque(maxlen=5000)  # (monotonic_ts, status)
         self.lag = {"fast": deque(maxlen=500), "slow": deque(maxlen=500)}
         self.counts = {"fast": 0, "slow": 0}
@@ -56,6 +59,22 @@ class TierScheduler:
             self.last_checked[k] = now
             self.lag[tier].append(elapsed)
         return [x[2] for x in out]
+
+    def after_check(self, rec: dict, status):
+        """Inconclusive result (blocked/rate-limited/unknown): re-check in RETRY_S instead of a full interval.
+        Capped at RETRY_MAX in a row so a permanently failing account cannot burn bandwidth."""
+        k = (rec.get("guild_id"), rec.get("username"))
+        if status in ("active", "unavailable"):
+            self.retries.pop(k, None)
+            return
+        n = self.retries.get(k, 0)
+        if n >= RETRY_MAX:
+            self.retries.pop(k, None)  # give up for this round, normal interval applies
+            return
+        self.retries[k] = n + 1
+        interval = FAST_S if _age_hours(rec) < FAST_WINDOW_H else SLOW_S
+        if RETRY_S < interval:
+            self.last_checked[k] = time.monotonic() - interval + RETRY_S
 
     def record_outcome(self, status):
         self.outcomes.append((time.monotonic(), status or "none"))

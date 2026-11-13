@@ -504,6 +504,7 @@ async def monitoring_worker():
                     try:
                         res = await checker.check(username)
                         sched.record_outcome(getattr(res, 'status', None))
+                        sched.after_check(rec, getattr(res, 'status', None))
                         if mode == "unban" and res.status == "active":
                             if not res.followers or res.followers == "?":
                                 try:
