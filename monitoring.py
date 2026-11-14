@@ -436,20 +436,9 @@ class ProfileChecker:
                 self.metrics.outcomes[result.status] += 1
                 return result
 
-        # Tier 2: Rotating Residential Fallback (DataImpulse 90M+ Pool)
-        # Trigger ONLY on rate_limited or challenge — not on unknown/generic errors (those drain bandwidth)
-        from config import ROTATING_RESIDENTIAL_PROXIES
-        if ROTATING_RESIDENTIAL_PROXIES and self.rotating_cycle and result is not None and result.status in {"rate_limited", "challenge"}:
-            p_rot = self._get_proxy(self.rotating_cycle)
-            if p_rot:
-                rot_res = await self._execute_single_check(username, p_rot)
-                trail.append(("T2-DI", rot_res.status))
-                self.tier_stats[("T2-DI", rot_res.status)] += 1
-                if rot_res.status in {"active", "unavailable"}:
-                    self.metrics.outcomes[rot_res.status] += 1
-                    return rot_res
-                elif result is None:
-                    result = rot_res
+        # Tier 2: DataImpulse DISABLED for routine background checks.
+        # Balance exhausted. DataImpulse is ONLY used in Tier 0 (prefer_rotating=True, i.e. !unban instant check).
+        # Routine checks fall straight to Tier 3 direct connection when Webshare fails.
 
         # Tier 3: Direct Connection Fallback
         # If proxies are rate-limited or errored out, clean direct check so alerts are NEVER dropped.
