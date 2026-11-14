@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+import collections
 import itertools
 import json
 import re
@@ -285,6 +286,9 @@ class ProfileChecker:
         self.residential_cycle = itertools.cycle(RESIDENTIAL_PROXIES) if RESIDENTIAL_PROXIES else None
         self.rotating_cycle = itertools.cycle(ROTATING_RESIDENTIAL_PROXIES) if ROTATING_RESIDENTIAL_PROXIES else None
         self._proxy_cooldowns = {}
+        self.tier_stats = collections.Counter()   # (tier, status) -> count since start
+        self.last_errors = {}                     # proxy kind -> last error text
+        self.started_at = time.time()
 
     def _mark_cooldown(self, proxy: str | None, seconds: float = 60.0):
         if not proxy:
@@ -368,9 +372,31 @@ class ProfileChecker:
                 self._mark_cooldown(proxy, 86400.0)
             elif isinstance(e, (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError)):
                 self._mark_cooldown(proxy, 30.0)
+            kind = "direct" if proxy is None else ("dataimpulse" if "dataimpulse" in proxy.lower() else "webshare")
+            self.last_errors[kind] = f"{type(e).__name__}: {str(e)[:90]}"
             logging.debug(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
             result = CheckResult(f"error_{type(e).__name__}")
         return result
+
+    def diag_text(self) -> str:
+        """Per-tier result counts since start + last proxy error per kind (for !health)."""
+        mins = max(1, int((time.time() - self.started_at) / 60))
+        tiers = {}
+        for (tier, status), n in self.tier_stats.items():
+            tiers.setdefault(tier, {})[status] = n
+        lines = [f"Proxy tiers since start ({mins} min):"]
+        for tier in ("T0-DI", "T1-static", "T2-DI", "T3-direct"):
+            d = tiers.get(tier)
+            if not d:
+                lines.append(f"{tier}: no attempts")
+                continue
+            total = sum(d.values())
+            good = d.get("active", 0) + d.get("unavailable", 0)
+            mix = ", ".join(f"{k}={v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
+            lines.append(f"{tier}: {total} tries, {100 * good // total}% conclusive ({mix})")
+        for kind, err in self.last_errors.items():
+            lines.append(f"last {kind} error: {err}")
+        return "\n".join(lines)
 
     async def check(self, username, prefer_rotating: bool = False):
         username = normalize_username(username)
@@ -386,6 +412,7 @@ class ProfileChecker:
                 if p_rot:
                     rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
                     trail.append(("T0-DI", rot_res.status))
+                    self.tier_stats[("T0-DI", rot_res.status)] += 1
                     if rot_res.status in {"active", "unavailable"}:
                         self.metrics.outcomes[rot_res.status] += 1
                         return rot_res
@@ -404,6 +431,7 @@ class ProfileChecker:
 
             result = await self._execute_single_check(username, p_primary)
             trail.append(("T1-static", result.status))
+            self.tier_stats[("T1-static", result.status)] += 1
             if result.status in {"active", "unavailable"}:
                 self.metrics.outcomes[result.status] += 1
                 return result
@@ -416,6 +444,7 @@ class ProfileChecker:
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)
                 trail.append(("T2-DI", rot_res.status))
+                self.tier_stats[("T2-DI", rot_res.status)] += 1
                 if rot_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[rot_res.status] += 1
                     return rot_res
@@ -428,6 +457,7 @@ class ProfileChecker:
             try:
                 direct_res = await self._execute_single_check(username, None)
                 trail.append(("T3-direct", direct_res.status))
+                self.tier_stats[("T3-direct", direct_res.status)] += 1
                 if direct_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[direct_res.status] += 1
                     return direct_res

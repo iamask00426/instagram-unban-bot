@@ -1075,7 +1075,10 @@ async def ping_command(ctx):
 
 @bot.command(name="health")
 async def health_command(ctx):
-    await ctx.send(sched.health_text())
+    text = sched.health_text()
+    if checker:
+        text += "\n\n" + checker.diag_text()
+    await ctx.send(text[:1990])
 
 @bot.command(name="proxies", aliases=["proxy", "proxystats"])
 async def proxies_command(ctx):

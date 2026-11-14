@@ -1013,7 +1013,10 @@ async def ping_cmd(message: types.Message):
 
 @dp.message(Command("health"))
 async def health_cmd(message: types.Message):
-    await message.answer(sched.health_text())
+    text = sched.health_text()
+    if checker:
+        text += "\n\n" + checker.diag_text()
+    await message.answer(text[:4000])
 
 @dp.message(Command("proxies", "proxy", "proxystats"))
 async def proxies_cmd(message: types.Message):
