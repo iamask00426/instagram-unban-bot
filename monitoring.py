@@ -405,17 +405,19 @@ class ProfileChecker:
         result = None
         trail = []  # (tier, status) of every attempt, logged if the final result is inconclusive
 
-        # Tier 0: Instant Check Priority with DataImpulse Rotating Residential (Fastest & 100% Reliable, 2 quick attempts)
-        if prefer_rotating and self.rotating_cycle:
-            for _ in range(2):
-                p_rot = self._get_proxy(self.rotating_cycle)
-                if p_rot:
-                    rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
-                    trail.append(("T0-DI", rot_res.status))
-                    self.tier_stats[("T0-DI", rot_res.status)] += 1
-                    if rot_res.status in {"active", "unavailable"}:
-                        self.metrics.outcomes[rot_res.status] += 1
-                        return rot_res
+        # Tier 0: Instant Check Priority (Fastest & 100% Reliable, 2 quick attempts via residential pool)
+        if prefer_rotating:
+            cycle = self.rotating_cycle or self.residential_cycle or self.proxies
+            if cycle:
+                for _ in range(2):
+                    p_rot = self._get_proxy(cycle)
+                    if p_rot:
+                        rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
+                        trail.append(("T0-instant", rot_res.status))
+                        self.tier_stats[("T0-instant", rot_res.status)] += 1
+                        if rot_res.status in {"active", "unavailable"}:
+                            self.metrics.outcomes[rot_res.status] += 1
+                            return rot_res
 
         # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
         proxy_attempts = 1 if (self.proxies or self.residential_cycle) else 0

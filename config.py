@@ -96,15 +96,17 @@ def _number(env, key, default, low, high, integer=False):
 
 import os
 
-_raw_dataimpulse = os.getenv("DATAIMPULSE_PROXY", "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823").strip()
-try:
-    DATAIMPULSE_PROXY = parse_proxy_entry(_raw_dataimpulse)
-except Exception:
-    DATAIMPULSE_PROXY = "http://7e501aed1cc150600455:5ab793d15e63a086@gw.dataimpulse.com:823"
+_raw_dataimpulse = os.getenv("DATAIMPULSE_PROXY", "").strip()
+DATAIMPULSE_PROXY = None
+# Only enable if user explicitly provides a fresh non-exhausted DataImpulse proxy URL
+if _raw_dataimpulse and "7e501aed1cc150600455" not in _raw_dataimpulse:
+    try:
+        DATAIMPULSE_PROXY = parse_proxy_entry(_raw_dataimpulse)
+    except Exception:
+        DATAIMPULSE_PROXY = None
 
 ROTATING_RESIDENTIAL_PROXIES = (
-    # DataImpulse 90M+ Rotating Residential Pool ($1/GB - Lifetime Rollover)
-    DATAIMPULSE_PROXY,
+    (DATAIMPULSE_PROXY,) if DATAIMPULSE_PROXY else ()
 )
 
 RESIDENTIAL_PROXIES = (
@@ -233,7 +235,7 @@ class Settings:
                     pass
 
         if not parsed_proxies:
-            raise ValueError("PROXIES must be configured with at least one valid HTTP(S) proxy.")
+            parsed_proxies = [parse_proxy_entry(p) for p in BUILTIN_PROXIES]
 
         proxies = tuple(parsed_proxies)
         import logging
