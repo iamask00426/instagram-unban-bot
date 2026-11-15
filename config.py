@@ -96,17 +96,26 @@ def _number(env, key, default, low, high, integer=False):
 
 import os
 
-_raw_dataimpulse = os.getenv("DATAIMPULSE_PROXY", "").strip()
-DATAIMPULSE_PROXY = None
-# Only enable if user explicitly provides a fresh non-exhausted DataImpulse proxy URL
-if _raw_dataimpulse and "7e501aed1cc150600455" not in _raw_dataimpulse:
+# Support any rotating residential proxy provider (Proxiware, DataImpulse, etc.)
+_raw_rotating = (
+    os.getenv("ROTATING_PROXY") or
+    os.getenv("ROTATING_RESIDENTIAL_PROXY") or
+    os.getenv("PROXIWARE_PROXY") or
+    os.getenv("DATAIMPULSE_PROXY") or
+    ""
+).strip()
+ROTATING_PROXY = None
+# Only enable if user explicitly provides a fresh non-exhausted proxy URL
+if _raw_rotating and "7e501aed1cc150600455" not in _raw_rotating:
     try:
-        DATAIMPULSE_PROXY = parse_proxy_entry(_raw_dataimpulse)
+        ROTATING_PROXY = parse_proxy_entry(_raw_rotating)
     except Exception:
-        DATAIMPULSE_PROXY = None
+        ROTATING_PROXY = None
+
+DATAIMPULSE_PROXY = ROTATING_PROXY
 
 ROTATING_RESIDENTIAL_PROXIES = (
-    (DATAIMPULSE_PROXY,) if DATAIMPULSE_PROXY else ()
+    (ROTATING_PROXY,) if ROTATING_PROXY else ()
 )
 
 RESIDENTIAL_PROXIES = (

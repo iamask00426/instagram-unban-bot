@@ -216,7 +216,12 @@ async def send_tg_unban_alert(chat_id: int, monitor_data: dict, result: CheckRes
         is_verified = getattr(result, "is_verified", False)
         card_io = None
         card_proxy = None
-        if checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
+        if checker and hasattr(checker, "rotating_cycle") and checker.rotating_cycle:
+            try:
+                card_proxy = checker._get_proxy(checker.rotating_cycle)
+            except Exception:
+                pass
+        elif checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
             try:
                 card_proxy = checker._get_proxy(checker.residential_cycle)
             except Exception:
@@ -356,7 +361,12 @@ async def send_tg_tick_alert(chat_id: int, monitor_data: dict, result: CheckResu
         full_name = getattr(result, "full_name", "") or raw_user
         card_io = None
         card_proxy = None
-        if checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
+        if checker and hasattr(checker, "rotating_cycle") and checker.rotating_cycle:
+            try:
+                card_proxy = checker._get_proxy(checker.rotating_cycle)
+            except Exception:
+                pass
+        elif checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
             try:
                 card_proxy = checker._get_proxy(checker.residential_cycle)
             except Exception:
@@ -771,7 +781,12 @@ async def lookup_cmd(message: types.Message):
             f"• <b>Status:</b> Active 🟢"
         )
         card_proxy = None
-        if checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
+        if checker and hasattr(checker, "rotating_cycle") and checker.rotating_cycle:
+            try:
+                card_proxy = checker._get_proxy(checker.rotating_cycle)
+            except Exception:
+                pass
+        elif checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
             try:
                 card_proxy = checker._get_proxy(checker.residential_cycle)
             except Exception:

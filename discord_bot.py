@@ -210,7 +210,12 @@ async def send_unban_alert(guild: discord.Guild, monitor_data: dict, result, is_
         is_verified = getattr(result, "is_verified", False)
         card_io = None
         card_proxy = None
-        if checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
+        if checker and hasattr(checker, "rotating_cycle") and checker.rotating_cycle:
+            try:
+                card_proxy = checker._get_proxy(checker.rotating_cycle)
+            except Exception:
+                pass
+        elif checker and hasattr(checker, "residential_cycle") and checker.residential_cycle:
             try:
                 card_proxy = checker._get_proxy(checker.residential_cycle)
             except Exception:
