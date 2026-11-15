@@ -17,6 +17,7 @@ import collections
 import itertools
 import json
 import os
+import random
 import re
 import time
 from urllib.parse import urlsplit
@@ -455,71 +456,92 @@ class ProfileChecker:
             lines.append(f"last {kind} error: {err}")
         return "\n".join(lines)
 
+    INSTANT_PAID_ATTEMPTS = int(os.getenv("INSTANT_PAID_ATTEMPTS", 6))   # fresh-IP tries when an account is added
+    ROUTINE_PAID_ATTEMPTS = int(os.getenv("ROUTINE_PAID_ATTEMPTS", 4))   # fresh-IP tries per routine check
+    STATIC_PROBE_RATE = float(os.getenv("STATIC_PROBE_RATE", 0.1))       # share of checks that still probe blocked static IPs
+
     async def check(self, username, prefer_rotating: bool = False, allow_paid: bool = True,
                     static_attempts: int = 1):
         """allow_paid=False keeps routine/slow checks off the paid per-GB gateway (T2);
-        static_attempts>1 retries on another free static IP instead."""
+        static_attempts>1 retries on another free static IP instead.
+
+        A rotating gateway gives a new IP per connection and a blocked try only costs a redirect
+        (~6 KB), so several quick fresh-IP tries inside one check are cheaper than waiting a whole
+        cycle. When static/direct IPs are mostly blocked they are skipped (10% probes keep the
+        health estimate alive)."""
         username = normalize_username(username)
         self._cleanup_cooldowns()
-        if not self.static_healthy():
-            allow_paid, static_attempts = True, 1  # static is blocked: don't waste tries, use paid
+        static_blocked = bool(self.rotating_cycle) and not self.static_healthy()
+        if static_blocked:
+            allow_paid, static_attempts = True, 1
 
         result = None
         trail = []  # (tier, status) of every attempt, logged if the final result is inconclusive
+        conclusive = {"active", "unavailable"}
+        tried_instant = False
 
-        # Tier 0: Instant Check Priority (Fastest & 100% Reliable, 2 quick attempts via residential pool)
+        # Tier 0: instant check right after an account is added - several fresh paid IPs in a row.
         if prefer_rotating:
             cycle = self.rotating_cycle or self.residential_cycle or self.proxies
             if cycle:
-                for _ in range(2):
+                tried_instant = True
+                for _ in range(max(2, self.INSTANT_PAID_ATTEMPTS if self.rotating_cycle else 2)):
                     p_rot = self._get_proxy(cycle)
-                    if p_rot:
-                        rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
-                        trail.append(("T0-instant", rot_res.status))
-                        self._record("T0-instant", rot_res)
-                        if rot_res.status in {"active", "unavailable"}:
-                            self.metrics.outcomes[rot_res.status] += 1
-                            return rot_res
+                    if not p_rot:
+                        continue
+                    rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.0)
+                    trail.append(("T0-instant", rot_res.status))
+                    self._record("T0-instant", rot_res)
+                    result = rot_res
+                    if rot_res.status in conclusive:
+                        self.metrics.outcomes[rot_res.status] += 1
+                        return rot_res
 
-        # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
+        # Tier 1: free static/shared IPs (skipped while they are mostly blocked, except for probes).
+        probe_static = (not static_blocked) or random.random() < self.STATIC_PROBE_RATE
         proxy_attempts = max(1, static_attempts) if (self.proxies or self.residential_cycle) else 0
+        if not probe_static or (prefer_rotating and tried_instant and static_blocked):
+            proxy_attempts = 0
+        t1_result = None
         for _ in range(proxy_attempts):
-            p_primary = None
-            if self.proxies:
-                p_primary = self._get_proxy(self.proxies)
-            elif self.residential_cycle:
-                p_primary = self._get_proxy(self.residential_cycle)
-
+            p_primary = self._get_proxy(self.proxies) if self.proxies else self._get_proxy(self.residential_cycle)
             if not p_primary:
                 break
+            t1_result = await self._execute_single_check(username, p_primary)
+            result = t1_result
+            trail.append(("T1-static", t1_result.status))
+            self._record("T1-static", t1_result)
+            if t1_result.status in conclusive:
+                self.metrics.outcomes[t1_result.status] += 1
+                return t1_result
 
-            result = await self._execute_single_check(username, p_primary)
-            trail.append(("T1-static", result.status))
-            self._record("T1-static", result)
-            if result.status in {"active", "unavailable"}:
-                self.metrics.outcomes[result.status] += 1
-                return result
-
-        # Tier 2: Rotating residential fallback (paid per GB, any provider) - ONLY when the free tier was
-        # blocked (rate_limited / challenge). Unknown/generic errors do not trigger it, to protect bandwidth.
-        if allow_paid and self.rotating_cycle and result is not None and result.status in {"rate_limited", "challenge"}:
-            p_rot = self._get_proxy(self.rotating_cycle)
-            if p_rot:
-                rot_res = await self._execute_single_check(username, p_rot)
+        # Tier 2: paid rotating gateway, several fresh-IP tries. Used when static was blocked
+        # (rate_limited / challenge) or is known to be blocked; not repeated after the instant tier.
+        use_paid = (allow_paid and self.rotating_cycle and not tried_instant
+                    and (static_blocked or (t1_result is not None and t1_result.status in {"rate_limited", "challenge"})))
+        if use_paid:
+            for _ in range(max(1, self.ROUTINE_PAID_ATTEMPTS)):
+                p_rot = self._get_proxy(self.rotating_cycle)
+                if not p_rot:
+                    break
+                rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.0)
+                result = rot_res
                 trail.append(("T2-rot", rot_res.status))
                 self._record("T2-rot", rot_res)
-                if rot_res.status in {"active", "unavailable"}:
+                if rot_res.status in conclusive:
                     self.metrics.outcomes[rot_res.status] += 1
                     return rot_res
 
-        # Tier 3: Direct Connection Fallback
-        # If proxies are rate-limited or errored out, clean direct check so alerts are NEVER dropped.
-        if result is None or result.status in {"rate_limited", "challenge", "unknown"} or result.status.startswith("error_") or result.status.startswith("HTTP_"):
+        # Tier 3: direct connection. Skipped when static is blocked and a paid gateway exists
+        # (direct is blocked the same way and only adds latency).
+        needs_direct = (result is None or result.status in {"rate_limited", "challenge", "unknown"}
+                        or result.status.startswith("error_") or result.status.startswith("HTTP_"))
+        if needs_direct and not (static_blocked and self.rotating_cycle):
             try:
                 direct_res = await self._execute_single_check(username, None)
                 trail.append(("T3-direct", direct_res.status))
                 self._record("T3-direct", direct_res)
-                if direct_res.status in {"active", "unavailable"}:
+                if direct_res.status in conclusive:
                     self.metrics.outcomes[direct_res.status] += 1
                     return direct_res
                 if result is None:
