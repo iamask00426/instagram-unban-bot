@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 import collections
 import itertools
 import json
+import os
 import re
 import time
 from urllib.parse import urlsplit
@@ -39,6 +40,7 @@ class CheckResult:
     full_name: str = ""
     is_verified: bool = False
     user_id: str | None = None
+    nbytes: int = 0  # encoded body bytes read for this check (0 for status-only answers)
 
 
 @dataclass
@@ -218,12 +220,23 @@ def json_profile(data, username):
     return CheckResult("active", username, *counts, pic if isinstance(pic, str) else None, 0, full_name, is_verified, uid)
 
 
+LOGIN_TITLE = re.compile(r"\blog\s*in\b|\blogin\b|challenge", re.I)
+
+
 async def read_profile(response, username, settings, metrics):
+    box = []
+    result = await _read_profile(response, username, settings, metrics, box)
+    result.nbytes = box[0].encoded if box else 0
+    return result
+
+
+async def _read_profile(response, username, settings, metrics, box):
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
     parser = ProfileHTMLParser(username)
     text = ""
     try:
         body = BoundedBody(response, settings.body_limit, metrics)
+        box.append(body)
         async for chunk in body:
             decoded = decoder.decode(chunk)
             if not parser.user_id:
@@ -243,6 +256,9 @@ async def read_profile(response, username, settings, metrics):
                     return result
                 if parser.boundary or parser.invalid:
                     break
+                # Login / challenge wall: the title is enough, stop reading (saves paid bandwidth).
+                if parser.title and not parser.in_title and LOGIN_TITLE.search(parser.title):
+                    break
             else:
                 text += decoded
         if settings.mode == "json" and body.complete:
@@ -253,7 +269,7 @@ async def read_profile(response, username, settings, metrics):
             return res
     except (ValueError, zlib.error, RecursionError):
         pass
-    if parser.title and re.search(r"\blog\s*in\b|\blogin\b|challenge", parser.title, re.I):
+    if parser.title and LOGIN_TITLE.search(parser.title):
         return CheckResult("challenge")
     if parser.boundary and (not parser.metadata.get("og:title") and not parser.metadata.get("og:description")):
         return CheckResult("unavailable")
@@ -289,6 +305,8 @@ class ProfileChecker:
         self.tier_stats = collections.Counter()   # (tier, status) -> count since start
         self.last_errors = {}                     # proxy kind -> last error text
         self.started_at = time.time()
+        self.tier_bytes = {}                      # tier -> deque of body bytes per attempt (last 500)
+        self.paid_bytes_est = 0                   # estimated billed bytes on the paid gateway
 
     @staticmethod
     def _is_rotating(proxy: str | None) -> bool:
@@ -386,6 +404,17 @@ class ProfileChecker:
             result = CheckResult(f"error_{type(e).__name__}")
         return result
 
+    # Rough per-request overhead on a fresh connection (TCP+proxy CONNECT+TLS+headers); override via env.
+    PAID_OVERHEAD = int(os.getenv("PAID_OVERHEAD_BYTES", 7000))
+
+    def _record(self, tier: str, res) -> None:
+        """Per-tier counters: result status, body bytes, estimated paid-gateway bytes."""
+        self.tier_stats[(tier, res.status)] += 1
+        n = getattr(res, "nbytes", 0) or 0
+        self.tier_bytes.setdefault(tier, collections.deque(maxlen=500)).append(n)
+        if tier in ("T0-instant", "T2-rot"):
+            self.paid_bytes_est += n + self.PAID_OVERHEAD
+
     def diag_text(self) -> str:
         """Per-tier result counts since start + last proxy error per kind (for !health)."""
         mins = max(1, int((time.time() - self.started_at) / 60))
@@ -401,12 +430,24 @@ class ProfileChecker:
             total = sum(d.values())
             good = d.get("active", 0) + d.get("unavailable", 0)
             mix = ", ".join(f"{k}={v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
-            lines.append(f"{tier}: {total} tries, {100 * good // total}% conclusive ({mix})")
+            sizes = sorted(self.tier_bytes.get(tier, []))
+            size_txt = ""
+            if sizes:
+                avg = sum(sizes) / len(sizes) / 1024
+                p95 = sizes[min(len(sizes) - 1, int(len(sizes) * 0.95))] / 1024
+                size_txt = f", body avg {avg:.1f} KB / p95 {p95:.1f} KB"
+            lines.append(f"{tier}: {total} tries, {100 * good // total}% conclusive ({mix}){size_txt}")
+        paid_mb = self.paid_bytes_est / 1048576
+        per_day = paid_mb / mins * 1440
+        lines.append(f"Paid proxy (est.): {paid_mb:.1f} MB since start, ~{per_day:.0f} MB/day")
         for kind, err in self.last_errors.items():
             lines.append(f"last {kind} error: {err}")
         return "\n".join(lines)
 
-    async def check(self, username, prefer_rotating: bool = False):
+    async def check(self, username, prefer_rotating: bool = False, allow_paid: bool = True,
+                    static_attempts: int = 1):
+        """allow_paid=False keeps routine/slow checks off the paid per-GB gateway (T2);
+        static_attempts>1 retries on another free static IP instead."""
         username = normalize_username(username)
         self._cleanup_cooldowns()
 
@@ -422,13 +463,13 @@ class ProfileChecker:
                     if p_rot:
                         rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.5)
                         trail.append(("T0-instant", rot_res.status))
-                        self.tier_stats[("T0-instant", rot_res.status)] += 1
+                        self._record("T0-instant", rot_res)
                         if rot_res.status in {"active", "unavailable"}:
                             self.metrics.outcomes[rot_res.status] += 1
                             return rot_res
 
         # Tier 1: Routine checks on UNLIMITED Shared & Static Residential Proxies (with auto-failover)
-        proxy_attempts = 1 if (self.proxies or self.residential_cycle) else 0
+        proxy_attempts = max(1, static_attempts) if (self.proxies or self.residential_cycle) else 0
         for _ in range(proxy_attempts):
             p_primary = None
             if self.proxies:
@@ -441,19 +482,19 @@ class ProfileChecker:
 
             result = await self._execute_single_check(username, p_primary)
             trail.append(("T1-static", result.status))
-            self.tier_stats[("T1-static", result.status)] += 1
+            self._record("T1-static", result)
             if result.status in {"active", "unavailable"}:
                 self.metrics.outcomes[result.status] += 1
                 return result
 
         # Tier 2: Rotating residential fallback (paid per GB, any provider) - ONLY when the free tier was
         # blocked (rate_limited / challenge). Unknown/generic errors do not trigger it, to protect bandwidth.
-        if self.rotating_cycle and result is not None and result.status in {"rate_limited", "challenge"}:
+        if allow_paid and self.rotating_cycle and result is not None and result.status in {"rate_limited", "challenge"}:
             p_rot = self._get_proxy(self.rotating_cycle)
             if p_rot:
                 rot_res = await self._execute_single_check(username, p_rot)
                 trail.append(("T2-rot", rot_res.status))
-                self.tier_stats[("T2-rot", rot_res.status)] += 1
+                self._record("T2-rot", rot_res)
                 if rot_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[rot_res.status] += 1
                     return rot_res
@@ -464,7 +505,7 @@ class ProfileChecker:
             try:
                 direct_res = await self._execute_single_check(username, None)
                 trail.append(("T3-direct", direct_res.status))
-                self.tier_stats[("T3-direct", direct_res.status)] += 1
+                self._record("T3-direct", direct_res)
                 if direct_res.status in {"active", "unavailable"}:
                     self.metrics.outcomes[direct_res.status] += 1
                     return direct_res

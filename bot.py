@@ -28,7 +28,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 import database_sync as database
-from scheduling import TierScheduler
+from scheduling import TierScheduler, NAME_WATCH_S
 from config import Settings, parse_usernames, RESIDENTIAL_PROXIES, ROTATING_RESIDENTIAL_PROXIES
 from monitoring import ProfileChecker, profile_session, CheckResult, fetch_user_id_by_username, resolve_username_by_uid
 from card_generator import create_profile_card, format_count
@@ -478,7 +478,7 @@ async def monitoring_worker():
                     logging.info(f"TG: 24h Username tracking auto-stopped for @{exp['raw_username']} (UID: {exp.get('user_id')})")
 
             # 2. Check accounts currently under 24-hour username change monitoring
-            if now_t - last_tracking_check > 45.0:
+            if now_t - last_tracking_check > NAME_WATCH_S:
                 last_tracking_check = now_t
                 tracking_records = database.get_username_tracking_monitors(platform="telegram")
 
@@ -510,17 +510,20 @@ async def monitoring_worker():
                 await asyncio.sleep(2.0)
                 continue
 
-            async def process_active_monitor(rec):
+            async def process_active_group(recs):
+                """One check per username; the result is delivered to every chat watching it."""
                 async with sem:
-                    username = rec["username"]
-                    mode = rec["mode"]
-                    chat_id = rec.get("guild_id") or rec.get("channel_id")
-
+                    username = recs[0]["username"]
                     try:
-                        res = await checker.check(username)
-                        sched.record_outcome(getattr(res, 'status', None))
-                        sched.after_check(rec, getattr(res, 'status', None))
-                        if mode == "unban" and res.status == "active":
+                        res = await checker.check(
+                            username,
+                            allow_paid=sched.paid_ok(recs),
+                            static_attempts=2 if sched.tier_of(recs) == "slow" else 1,
+                        )
+                        status = getattr(res, 'status', None)
+                        sched.record_outcome(status)
+                        sched.after_check(recs, status)
+                        if status == "active" and any(r["mode"] == "unban" for r in recs):
                             if not res.followers or res.followers == "?":
                                 try:
                                     prof_data = await asyncio.wait_for(resolve_instagram_profile_data(username, checker), timeout=3.5)
@@ -538,16 +541,26 @@ async def monitoring_worker():
                                         res.user_id = prof_data["user_id"]
                                 except Exception:
                                     pass
-                            await send_tg_unban_alert(chat_id, rec, res)
-                        elif mode == "ban" and res.status == "unavailable":
-                            await send_tg_ban_alert(chat_id, rec)
-                        elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
-                            await send_tg_tick_alert(chat_id, rec, res)
+
+                        async def _deliver(rec):
+                            mode = rec["mode"]
+                            chat_id = rec.get("guild_id") or rec.get("channel_id")
+                            try:
+                                if mode == "unban" and res.status == "active":
+                                    await send_tg_unban_alert(chat_id, rec, res)
+                                elif mode == "ban" and res.status == "unavailable":
+                                    await send_tg_ban_alert(chat_id, rec)
+                                elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
+                                    await send_tg_tick_alert(chat_id, rec, res)
+                            except Exception as e:
+                                logging.debug(f"TG error delivering @{username}: {e}")
+
+                        await asyncio.gather(*(_deliver(r) for r in recs))
                     except Exception as e:
                         logging.debug(f"TG error checking @{username}: {e}")
 
-            for rec in sched.due(active_cache):
-                asyncio.create_task(process_active_monitor(rec))
+            for group in sched.due_groups(active_cache):
+                asyncio.create_task(process_active_group(group))
             await asyncio.sleep(1.0)
 
         except Exception as e:
