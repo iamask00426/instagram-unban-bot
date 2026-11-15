@@ -102,7 +102,7 @@ _raw_rotating = (
     os.getenv("ROTATING_RESIDENTIAL_PROXY") or
     os.getenv("PROXIWARE_PROXY") or
     os.getenv("DATAIMPULSE_PROXY") or
-    ""
+    "http://user-cIW1zPrcWUv8-network-eco:Qo0EgdsmF0TC@proxy.proxiware.com:1337"
 ).strip()
 ROTATING_PROXY = None
 # Only enable if user explicitly provides a fresh non-exhausted proxy URL
