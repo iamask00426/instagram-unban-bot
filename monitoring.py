@@ -307,6 +307,7 @@ class ProfileChecker:
         self.started_at = time.time()
         self.tier_bytes = {}                      # tier -> deque of body bytes per attempt (last 500)
         self.paid_bytes_est = 0                   # estimated billed bytes on the paid gateway
+        self.static_recent = collections.deque(maxlen=40)  # last T1 outcomes: True = conclusive
 
     @staticmethod
     def _is_rotating(proxy: str | None) -> bool:
@@ -407,8 +408,17 @@ class ProfileChecker:
     # Rough per-request overhead on a fresh connection (TCP+proxy CONNECT+TLS+headers); override via env.
     PAID_OVERHEAD = int(os.getenv("PAID_OVERHEAD_BYTES", 7000))
 
+    def static_healthy(self) -> bool:
+        """False when free static IPs are mostly blocked (<25% conclusive over the last 40 tries).
+        Then slow-tier checks may use the paid gateway too, otherwise they would never succeed."""
+        if len(self.static_recent) < 10:
+            return True
+        return sum(self.static_recent) / len(self.static_recent) >= 0.25
+
     def _record(self, tier: str, res) -> None:
         """Per-tier counters: result status, body bytes, estimated paid-gateway bytes."""
+        if tier == "T1-static":
+            self.static_recent.append(res.status in ("active", "unavailable"))
         self.tier_stats[(tier, res.status)] += 1
         n = getattr(res, "nbytes", 0) or 0
         self.tier_bytes.setdefault(tier, collections.deque(maxlen=500)).append(n)
@@ -439,6 +449,7 @@ class ProfileChecker:
             lines.append(f"{tier}: {total} tries, {100 * good // total}% conclusive ({mix}){size_txt}")
         paid_mb = self.paid_bytes_est / 1048576
         per_day = paid_mb / mins * 1440
+        lines.append(f"Static IPs healthy: {'yes' if self.static_healthy() else 'NO (blocked) - paid used for all tiers'}")
         lines.append(f"Paid proxy (est.): {paid_mb:.1f} MB since start, ~{per_day:.0f} MB/day")
         for kind, err in self.last_errors.items():
             lines.append(f"last {kind} error: {err}")
@@ -450,6 +461,8 @@ class ProfileChecker:
         static_attempts>1 retries on another free static IP instead."""
         username = normalize_username(username)
         self._cleanup_cooldowns()
+        if not self.static_healthy():
+            allow_paid, static_attempts = True, 1  # static is blocked: don't waste tries, use paid
 
         result = None
         trail = []  # (tier, status) of every attempt, logged if the final result is inconclusive
