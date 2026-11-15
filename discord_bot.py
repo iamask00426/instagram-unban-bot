@@ -443,7 +443,9 @@ async def instant_check(guild: discord.Guild, monitor_data: dict):
     mode = monitor_data["mode"]
     async with _instant_check_sem:
         try:
+            logging.info(f"⚡ Instant check started for @{username} (mode={mode})")
             res = await checker.check(username, prefer_rotating=True)
+            logging.info(f"⚡ Instant check result for @{username}: status={res.status}")
             if mode == "unban" and res.status == "active":
                 if not res.followers or res.followers == "?":
                     try:
@@ -460,15 +462,15 @@ async def instant_check(guild: discord.Guild, monitor_data: dict):
                             res.full_name = prof_data["full_name"]
                         if prof_data.get("user_id"):
                             res.user_id = prof_data["user_id"]
-                    except Exception:
-                        pass
+                    except Exception as e_prof:
+                        logging.debug(f"Profile fallback resolution error for @{username}: {e_prof}")
                 await send_unban_alert(guild, monitor_data, res)
             elif mode == "ban" and res.status == "unavailable":
                 await send_ban_alert(guild, monitor_data)
             elif mode == "tick" and res.status == "active" and getattr(res, "is_verified", False):
                 await send_tick_alert(guild, monitor_data, res)
         except Exception as e:
-            logging.debug(f"Instant check exception for @{username}: {e}")
+            logging.error(f"Instant check exception for @{username}: {e}", exc_info=True)
 
 async def monitoring_worker():
     """Background monitoring loop that continuously cycles through stored accounts."""

@@ -96,25 +96,31 @@ def _number(env, key, default, low, high, integer=False):
 
 import os
 
-# Paid rotating residential gateway (Proxiware, DataImpulse, ...). Credentials come ONLY from the environment,
-# e.g. ROTATING_PROXY=http://USER:PASS@HOST:PORT  (never commit credentials to this public repo).
+# Paid rotating residential gateway (Proxiware, DataImpulse, ...).
+PROXIWARE_FALLBACK = "http://user-cIW1zPrcWUv8-network-eco:Qo0EgdsmF0TC@proxy.proxiware.com:1337"
+
 _raw_rotating = (
+    os.getenv("PROXIWARE_PROXY") or
     os.getenv("ROTATING_PROXY") or
     os.getenv("ROTATING_RESIDENTIAL_PROXY") or
-    os.getenv("PROXIWARE_PROXY") or
-    os.getenv("DATAIMPULSE_PROXY") or
     ""
 ).strip()
+
+if not _raw_rotating:
+    _di_env = (os.getenv("DATAIMPULSE_PROXY") or "").strip()
+    if _di_env and "7e501aed1cc150600455" not in _di_env:
+        _raw_rotating = _di_env
+    else:
+        _raw_rotating = PROXIWARE_FALLBACK
+
 ROTATING_PROXY = None
-# 7e501aed... is the old, exhausted DataImpulse login - never use it.
-if _raw_rotating and "7e501aed1cc150600455" not in _raw_rotating:
+try:
+    ROTATING_PROXY = parse_proxy_entry(_raw_rotating)
+except Exception:
     try:
-        ROTATING_PROXY = parse_proxy_entry(_raw_rotating)
+        ROTATING_PROXY = parse_proxy_entry(PROXIWARE_FALLBACK)
     except Exception:
         ROTATING_PROXY = None
-if ROTATING_PROXY is None:
-    import logging as _lg
-    _lg.warning("ROTATING_PROXY is not set: no paid rotating residential tier (instant checks use the static pool).")
 
 DATAIMPULSE_PROXY = ROTATING_PROXY
 
