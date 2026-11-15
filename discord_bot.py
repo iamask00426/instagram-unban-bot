@@ -495,7 +495,7 @@ async def monitoring_worker():
             # 2. Check 24h username tracking accounts every 60s — parallel, not serial
             if now - last_tracking_check > 60.0:
                 last_tracking_check = now
-                tracking_records = database.get_username_tracking_monitors()
+                tracking_records = database.get_username_tracking_monitors(platform="discord")
 
                 async def _check_tracking(rec):
                     if bot.is_closed():
@@ -523,7 +523,7 @@ async def monitoring_worker():
             # 3. Active monitors: two-tier cadence (new accounts fast, old accounts slow)
             if now_cache is None or time.monotonic() - now_cache > 5.0:
                 now_cache = time.monotonic()
-                active_cache = database.get_active_monitors()
+                active_cache = database.get_active_monitors(platform="discord")
             if not active_cache:
                 await asyncio.sleep(2.0)
                 continue
@@ -1109,7 +1109,7 @@ async def proxies_command(ctx):
         inline=False
     )
     embed.add_field(
-        name="🔥 DataImpulse (Rotating Residential Tier 2 & Tier 0)",
+        name="🔥 Rotating Residential (paid per GB, Tier 2 & Tier 0)",
         value=f"• Requests: **{di_req:,}**\n• Usage: **{di_pct:.1f}%**\n• *Instant checks & challenge failovers*",
         inline=False
     )
@@ -1119,7 +1119,7 @@ async def proxies_command(ctx):
             value=f"• Requests: **{dir_req:,}**\n• Usage: **{dir_pct:.1f}%**",
             inline=False
         )
-    embed.set_footer(text="DataImpulse bandwidth is strictly conserved for instant checks & failovers.")
+    embed.set_footer(text="Rotating residential bandwidth is strictly conserved for instant checks & failovers.")
     await ctx.send(embed=embed)
 
 async def display_unban_stats(ctx, window_seconds: int, window_label: str):

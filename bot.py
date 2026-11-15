@@ -480,7 +480,7 @@ async def monitoring_worker():
             # 2. Check accounts currently under 24-hour username change monitoring
             if now_t - last_tracking_check > 45.0:
                 last_tracking_check = now_t
-                tracking_records = database.get_username_tracking_monitors()
+                tracking_records = database.get_username_tracking_monitors(platform="telegram")
 
                 async def _check_tracking(rec):
                     uid = rec.get("user_id")
@@ -505,7 +505,7 @@ async def monitoring_worker():
             # 3. Active monitors: two-tier cadence (new accounts fast, old accounts slow)
             if now_cache is None or time.monotonic() - now_cache > 5.0:
                 now_cache = time.monotonic()
-                active_cache = database.get_active_monitors()
+                active_cache = database.get_active_monitors(platform="telegram")
             if not active_cache:
                 await asyncio.sleep(2.0)
                 continue
@@ -1062,13 +1062,13 @@ async def proxies_cmd(message: types.Message):
         f"⚡ <b>Webshare (Static/Shared Proxies):</b>\n"
         f"• Requests: <code>{ws_req:,}</code> (<b>{ws_pct:.1f}%</b>)\n"
         f"• <i>Routine monitoring checks (Unlimited bandwidth)</i>\n\n"
-        f"🔥 <b>DataImpulse (Rotating Residential):</b>\n"
+        f"🔥 <b>Rotating Residential (paid per GB):</b>\n"
         f"• Requests: <code>{di_req:,}</code> (<b>{di_pct:.1f}%</b>)\n"
         f"• <i>Instant checks & challenge failovers</i>\n\n"
     )
     if dir_req > 0:
         text += f"🌐 <b>Direct Connection (Fallback):</b>\n• Requests: <code>{dir_req:,}</code> (<b>{dir_pct:.1f}%</b>)\n\n"
-    text += "<i>💡 DataImpulse bandwidth is strictly conserved for instant checks & failovers.</i>"
+    text += "<i>💡 Rotating residential bandwidth is strictly conserved for instant checks & failovers.</i>"
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 # --- MAIN RUNNER ---

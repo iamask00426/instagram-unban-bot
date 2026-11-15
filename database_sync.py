@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sqlite3
 import os
 import shutil
@@ -202,7 +203,25 @@ def get_all_monitors(guild_id: int = None) -> list[dict]:
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
-def get_active_monitors(guild_id: int = None) -> list[dict]:
+# Discord snowflake ids are > 1e15; Telegram chat ids never get that large. guild_id 0 = Discord DM.
+_DISCORD_ID_MIN = 10 ** 15
+
+
+def monitor_platform(guild_id) -> str:
+    try:
+        g = int(guild_id or 0)
+    except (TypeError, ValueError):
+        return "telegram"
+    return "discord" if (g == 0 or abs(g) >= _DISCORD_ID_MIN) else "telegram"
+
+
+def _only_platform(rows: list[dict], platform: str | None) -> list[dict]:
+    if not platform:
+        return rows
+    return [r for r in rows if monitor_platform(r.get("guild_id")) == platform]
+
+
+def get_active_monitors(guild_id: int = None, platform: str = None) -> list[dict]:
     """Return only monitors with status != 'tracking_username' — newest additions prioritized first."""
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -216,7 +235,7 @@ def get_active_monitors(guild_id: int = None) -> list[dict]:
                 "SELECT * FROM monitors WHERE (status IS NULL OR status != 'tracking_username') ORDER BY created_at DESC"
             )
         rows = cursor.fetchall()
-        return [dict(r) for r in rows]
+        return _only_platform([dict(r) for r in rows], platform)
 
 def clear_all_monitors(guild_id: int) -> int:
     with get_connection() as conn:
@@ -319,12 +338,12 @@ def transition_to_username_tracking(username: str, guild_id: int, user_id: str, 
         """, (str(user_id) if user_id else None, float(unbanned_at), username.lower(), guild_id))
         conn.commit()
 
-def get_username_tracking_monitors() -> list[dict]:
+def get_username_tracking_monitors(platform: str = None) -> list[dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM monitors WHERE status = 'tracking_username' ORDER BY unbanned_at ASC")
         rows = cursor.fetchall()
-        return [dict(r) for r in rows]
+        return _only_platform([dict(r) for r in rows], platform)
 
 def update_tracked_username(old_username: str, new_username: str, guild_id: int):
     with get_connection() as conn:

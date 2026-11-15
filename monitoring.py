@@ -290,6 +290,14 @@ class ProfileChecker:
         self.last_errors = {}                     # proxy kind -> last error text
         self.started_at = time.time()
 
+    @staticmethod
+    def _is_rotating(proxy: str | None) -> bool:
+        """True for the paid per-GB rotating residential gateway (any provider)."""
+        if not proxy:
+            return False
+        from config import ROTATING_RESIDENTIAL_PROXIES
+        return proxy in ROTATING_RESIDENTIAL_PROXIES or "dataimpulse" in proxy.lower()
+
     def _mark_cooldown(self, proxy: str | None, seconds: float = 60.0):
         if not proxy:
             return
@@ -330,7 +338,7 @@ class ProfileChecker:
         self.metrics.request_attempts += 1
         if proxy is None:
             self.metrics.direct_requests += 1
-        elif "dataimpulse" in proxy.lower():
+        elif self._is_rotating(proxy):
             self.metrics.dataimpulse_requests += 1
         else:
             self.metrics.webshare_requests += 1
@@ -372,7 +380,7 @@ class ProfileChecker:
                 self._mark_cooldown(proxy, 86400.0)
             elif isinstance(e, (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError)):
                 self._mark_cooldown(proxy, 30.0)
-            kind = "direct" if proxy is None else ("dataimpulse" if "dataimpulse" in proxy.lower() else "webshare")
+            kind = "direct" if proxy is None else ("rotating" if self._is_rotating(proxy) else "webshare")
             self.last_errors[kind] = f"{type(e).__name__}: {str(e)[:90]}"
             logging.debug(f"Profile check error for @{username} via {proxy}: {type(e).__name__}: {e}")
             result = CheckResult(f"error_{type(e).__name__}")
@@ -385,7 +393,7 @@ class ProfileChecker:
         for (tier, status), n in self.tier_stats.items():
             tiers.setdefault(tier, {})[status] = n
         lines = [f"Proxy tiers since start ({mins} min):"]
-        for tier in ("T0-DI", "T1-static", "T2-DI", "T3-direct"):
+        for tier in ("T0-instant", "T1-static", "T2-rot", "T3-direct"):
             d = tiers.get(tier)
             if not d:
                 lines.append(f"{tier}: no attempts")
@@ -438,9 +446,17 @@ class ProfileChecker:
                 self.metrics.outcomes[result.status] += 1
                 return result
 
-        # Tier 2: DataImpulse DISABLED for routine background checks.
-        # Balance exhausted. DataImpulse is ONLY used in Tier 0 (prefer_rotating=True, i.e. !unban instant check).
-        # Routine checks fall straight to Tier 3 direct connection when Webshare fails.
+        # Tier 2: Rotating residential fallback (paid per GB, any provider) - ONLY when the free tier was
+        # blocked (rate_limited / challenge). Unknown/generic errors do not trigger it, to protect bandwidth.
+        if self.rotating_cycle and result is not None and result.status in {"rate_limited", "challenge"}:
+            p_rot = self._get_proxy(self.rotating_cycle)
+            if p_rot:
+                rot_res = await self._execute_single_check(username, p_rot)
+                trail.append(("T2-rot", rot_res.status))
+                self.tier_stats[("T2-rot", rot_res.status)] += 1
+                if rot_res.status in {"active", "unavailable"}:
+                    self.metrics.outcomes[rot_res.status] += 1
+                    return rot_res
 
         # Tier 3: Direct Connection Fallback
         # If proxies are rate-limited or errored out, clean direct check so alerts are NEVER dropped.
