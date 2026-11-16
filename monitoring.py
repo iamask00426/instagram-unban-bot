@@ -412,21 +412,36 @@ class ProfileChecker:
     # Rough per-request overhead on a fresh connection (TCP+proxy CONNECT+TLS+headers); override via env.
     PAID_OVERHEAD = int(os.getenv("PAID_OVERHEAD_BYTES", 7000))
 
-    # Hard daily cap on the paid gateway (estimated MB, per process, resets 00:00 UTC). 0 = no cap.
+    # Daily paid-gateway budget (estimated MB, per process, resets 00:00 UTC). 0 = unlimited.
+    #  ok   : full speed while usage stays under the "pace" line (daily budget spread over the day, +15% head start)
+    #  pace : over the line -> monitoring CONTINUES at reduced speed (1 try per check; slow tier on paid only 1 check in 3)
+    #  hard : over PAID_HARD_MB (default 2x daily) -> paid off to protect the balance (static/direct only, 1 instant try)
     PAID_DAILY_MB = float(os.getenv("PAID_DAILY_MB", 600))
+    PAID_HARD_MB = float(os.getenv("PAID_HARD_MB", 0)) or 0.0
 
     def _roll_day(self):
         today = datetime.now(timezone.utc).date()
         if self.paid_day != today:
             self.paid_day, self.paid_day_bytes = today, 0
 
-    def budget_left(self) -> bool:
-        """False once today's estimated paid usage reached PAID_DAILY_MB: paid tiers are then switched
-        off (except a single instant try per added account) until midnight UTC."""
+    def _day_frac(self) -> float:
+        n = datetime.now(timezone.utc)
+        return (n.hour * 3600 + n.minute * 60 + n.second) / 86400.0
+
+    def budget_state(self) -> str:
         if self.PAID_DAILY_MB <= 0:
-            return True
+            return "ok"
         self._roll_day()
-        return self.paid_day_bytes < self.PAID_DAILY_MB * 1048576
+        used = self.paid_day_bytes / 1048576
+        hard = self.PAID_HARD_MB or self.PAID_DAILY_MB * 2
+        if used >= hard:
+            return "hard"
+        if used >= self.PAID_DAILY_MB * min(1.0, self._day_frac() + 0.15):
+            return "pace"
+        return "ok"
+
+    def budget_left(self) -> bool:
+        return self.budget_state() != "hard"
 
     BAD_POOL_RATE = float(os.getenv("BAD_POOL_RATE", 0.06))
 
@@ -492,8 +507,11 @@ class ProfileChecker:
         lines.append("Paid pool success (last 60 tries): "
                      + ("collecting data" if pr is None else f"{100 * pr:.0f}%" + (" - BAD WINDOW, 1 try/check" if self.pool_bad() else "")))
         if self.PAID_DAILY_MB > 0:
-            lines.append(f"Paid budget today: {self.paid_day_bytes / 1048576:.0f} / {self.PAID_DAILY_MB:.0f} MB"
-                         + ("" if self.budget_left() else "  BUDGET HIT - paid tiers off until 00:00 UTC"))
+            st = self.budget_state()
+            hard = self.PAID_HARD_MB or self.PAID_DAILY_MB * 2
+            lines.append(f"Paid budget today: {self.paid_day_bytes / 1048576:.0f} MB (daily {self.PAID_DAILY_MB:.0f}, hard stop {hard:.0f})"
+                         + {"ok": "", "pace": "  PACING - slower, monitoring continues",
+                            "hard": "  HARD STOP - paid off until 00:00 UTC"}[st])
         lines.append(f"Paid proxy (est.): {paid_mb:.1f} MB since start, ~{per_day:.0f} MB/day")
         for kind, err in self.last_errors.items():
             lines.append(f"last {kind} error: {err}")
@@ -515,7 +533,9 @@ class ProfileChecker:
         username = normalize_username(username)
         self._cleanup_cooldowns()
         static_blocked = bool(self.rotating_cycle) and not self.static_healthy()
-        budget_ok = self.budget_left()
+        bstate = self.budget_state()
+        budget_ok = bstate != "hard"
+        pace = bstate == "pace"
         if static_blocked:
             allow_paid, static_attempts = True, 1
         if not budget_ok:
@@ -569,8 +589,10 @@ class ProfileChecker:
         # (rate_limited / challenge) or is known to be blocked; not repeated after the instant tier.
         use_paid = (allow_paid and self.rotating_cycle and not tried_instant
                     and (static_blocked or (t1_result is not None and t1_result.status in {"rate_limited", "challenge"})))
+        if use_paid and pace and not fast and random.random() > 0.34:
+            use_paid = False  # over the pace line: slow tier gets a paid check only 1 time in 3
         if use_paid:
-            n_routine = 1 if (self.pool_bad() and not fast) else max(1, self.ROUTINE_PAID_ATTEMPTS)
+            n_routine = 1 if (pace or (self.pool_bad() and not fast)) else max(1, self.ROUTINE_PAID_ATTEMPTS)
             for _ in range(n_routine):
                 p_rot = self._get_proxy(self.rotating_cycle)
                 if not p_rot:
