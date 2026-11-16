@@ -308,6 +308,8 @@ class ProfileChecker:
         self.started_at = time.time()
         self.tier_bytes = {}                      # tier -> deque of body bytes per attempt (last 500)
         self.paid_bytes_est = 0                   # estimated billed bytes on the paid gateway
+        self.paid_day = None                      # UTC date of the daily counter
+        self.paid_day_bytes = 0                   # estimated paid bytes today (UTC)
         self.static_recent = collections.deque(maxlen=40)  # last T1 outcomes: True = conclusive
 
     @staticmethod
@@ -409,6 +411,22 @@ class ProfileChecker:
     # Rough per-request overhead on a fresh connection (TCP+proxy CONNECT+TLS+headers); override via env.
     PAID_OVERHEAD = int(os.getenv("PAID_OVERHEAD_BYTES", 7000))
 
+    # Hard daily cap on the paid gateway (estimated MB, per process, resets 00:00 UTC). 0 = no cap.
+    PAID_DAILY_MB = float(os.getenv("PAID_DAILY_MB", 600))
+
+    def _roll_day(self):
+        today = datetime.now(timezone.utc).date()
+        if self.paid_day != today:
+            self.paid_day, self.paid_day_bytes = today, 0
+
+    def budget_left(self) -> bool:
+        """False once today's estimated paid usage reached PAID_DAILY_MB: paid tiers are then switched
+        off (except a single instant try per added account) until midnight UTC."""
+        if self.PAID_DAILY_MB <= 0:
+            return True
+        self._roll_day()
+        return self.paid_day_bytes < self.PAID_DAILY_MB * 1048576
+
     def static_healthy(self) -> bool:
         """False when free static IPs are mostly blocked (<25% conclusive over the last 40 tries).
         Then slow-tier checks may use the paid gateway too, otherwise they would never succeed."""
@@ -425,6 +443,8 @@ class ProfileChecker:
         self.tier_bytes.setdefault(tier, collections.deque(maxlen=500)).append(n)
         if tier in ("T0-instant", "T2-rot"):
             self.paid_bytes_est += n + self.PAID_OVERHEAD
+            self._roll_day()
+            self.paid_day_bytes += n + self.PAID_OVERHEAD
 
     def diag_text(self) -> str:
         """Per-tier result counts since start + last proxy error per kind (for !health)."""
@@ -451,13 +471,16 @@ class ProfileChecker:
         paid_mb = self.paid_bytes_est / 1048576
         per_day = paid_mb / mins * 1440
         lines.append(f"Static IPs healthy: {'yes' if self.static_healthy() else 'NO (blocked) - paid used for all tiers'}")
+        if self.PAID_DAILY_MB > 0:
+            lines.append(f"Paid budget today: {self.paid_day_bytes / 1048576:.0f} / {self.PAID_DAILY_MB:.0f} MB"
+                         + ("" if self.budget_left() else "  BUDGET HIT - paid tiers off until 00:00 UTC"))
         lines.append(f"Paid proxy (est.): {paid_mb:.1f} MB since start, ~{per_day:.0f} MB/day")
         for kind, err in self.last_errors.items():
             lines.append(f"last {kind} error: {err}")
         return "\n".join(lines)
 
-    INSTANT_PAID_ATTEMPTS = int(os.getenv("INSTANT_PAID_ATTEMPTS", 6))   # fresh-IP tries when an account is added
-    ROUTINE_PAID_ATTEMPTS = int(os.getenv("ROUTINE_PAID_ATTEMPTS", 4))   # fresh-IP tries per routine check
+    INSTANT_PAID_ATTEMPTS = int(os.getenv("INSTANT_PAID_ATTEMPTS", 3))   # fresh-IP tries when an account is added
+    ROUTINE_PAID_ATTEMPTS = int(os.getenv("ROUTINE_PAID_ATTEMPTS", 2))   # fresh-IP tries per routine check
     STATIC_PROBE_RATE = float(os.getenv("STATIC_PROBE_RATE", 0.1))       # share of checks that still probe blocked static IPs
 
     async def check(self, username, prefer_rotating: bool = False, allow_paid: bool = True,
@@ -472,8 +495,11 @@ class ProfileChecker:
         username = normalize_username(username)
         self._cleanup_cooldowns()
         static_blocked = bool(self.rotating_cycle) and not self.static_healthy()
+        budget_ok = self.budget_left()
         if static_blocked:
             allow_paid, static_attempts = True, 1
+        if not budget_ok:
+            allow_paid = False
 
         result = None
         trail = []  # (tier, status) of every attempt, logged if the final result is inconclusive
@@ -485,7 +511,10 @@ class ProfileChecker:
             cycle = self.rotating_cycle or self.residential_cycle or self.proxies
             if cycle:
                 tried_instant = True
-                for _ in range(max(2, self.INSTANT_PAID_ATTEMPTS if self.rotating_cycle else 2)):
+                n_instant = max(2, self.INSTANT_PAID_ATTEMPTS if self.rotating_cycle else 2)
+                if not budget_ok:
+                    n_instant = 1
+                for _ in range(n_instant):
                     p_rot = self._get_proxy(cycle)
                     if not p_rot:
                         continue
@@ -498,7 +527,7 @@ class ProfileChecker:
                         return rot_res
 
         # Tier 1: free static/shared IPs (skipped while they are mostly blocked, except for probes).
-        probe_static = (not static_blocked) or random.random() < self.STATIC_PROBE_RATE
+        probe_static = (not static_blocked) or (not budget_ok) or random.random() < self.STATIC_PROBE_RATE
         proxy_attempts = max(1, static_attempts) if (self.proxies or self.residential_cycle) else 0
         if not probe_static or (prefer_rotating and tried_instant and static_blocked):
             proxy_attempts = 0
@@ -536,7 +565,7 @@ class ProfileChecker:
         # (direct is blocked the same way and only adds latency).
         needs_direct = (result is None or result.status in {"rate_limited", "challenge", "unknown"}
                         or result.status.startswith("error_") or result.status.startswith("HTTP_"))
-        if needs_direct and not (static_blocked and self.rotating_cycle):
+        if needs_direct and not (static_blocked and self.rotating_cycle and budget_ok):
             try:
                 direct_res = await self._execute_single_check(username, None)
                 trail.append(("T3-direct", direct_res.status))

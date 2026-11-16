@@ -12,7 +12,7 @@ FAST_S = float(os.getenv("FAST_INTERVAL_SECONDS", 60))
 SLOW_S = float(os.getenv("SLOW_INTERVAL_SECONDS", 120))
 FAST_WINDOW_H = float(os.getenv("FAST_WINDOW_HOURS", 168))
 RETRY_S = float(os.getenv("RETRY_INTERVAL_SECONDS", 8))
-RETRY_MAX = int(os.getenv("RETRY_MAX_CONSECUTIVE", 3))
+RETRY_MAX = int(os.getenv("RETRY_MAX_CONSECUTIVE", 1))
 NAME_WATCH_S = float(os.getenv("NAME_WATCH_INTERVAL_SECONDS", 120))
 
 
