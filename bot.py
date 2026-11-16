@@ -519,8 +519,17 @@ async def monitoring_worker():
                             username,
                             allow_paid=sched.paid_ok(recs),
                             static_attempts=2 if sched.tier_of(recs) == "slow" else 1,
+                            fast=sched.tier_of(recs) == "fast",
                         )
                         status = getattr(res, 'status', None)
+                        # A ban alert is only sent after a second, independent check agrees
+                        # (a blocked/odd page must never look like a ban).
+                        if status == "unavailable" and any(r["mode"] == "ban" for r in recs):
+                            again = await checker.check(username, allow_paid=True, fast=True)
+                            if getattr(again, "status", None) != "unavailable":
+                                logging.info("BAN not confirmed for @%s (second check: %s), no alert", username,
+                                             getattr(again, "status", None))
+                                status, res = getattr(again, "status", None), again
                         sched.record_outcome(status)
                         sched.after_check(recs, status)
                         if status == "active" and any(r["mode"] == "unban" for r in recs):
