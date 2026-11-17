@@ -293,6 +293,75 @@ def retry_after_seconds(value, maximum, now=None):
         return 0
 
 
+class PoolBoard:
+    """Scoreboard for several paid per-GB rotating pools (any providers).
+
+    Each try's outcome (conclusive or not) is recorded per pool. Tries go to the pool with the best
+    score = success^2 / price_per_GB (success counts twice because a late alert costs more than a few
+    extra MB), a small share goes to the others so a recovering pool is noticed, and a pool that
+    answers 402/407 (no data / bad login) is skipped for a while. New pools are sampled first."""
+    WINDOW = 40
+    MIN_SAMPLES = 20
+    EXPLORE = float(os.getenv("POOL_EXPLORE_RATE", 0.12))
+
+    def __init__(self, pools, prices=None, clock=time.monotonic):
+        self.pools = list(pools)
+        self.prices = {p: float((prices or {}).get(p, 1.0)) for p in self.pools}
+        self.recent = {p: collections.deque(maxlen=self.WINDOW) for p in self.pools}
+        self.tries = collections.Counter()
+        self.good = collections.Counter()
+        self.nbytes = collections.Counter()
+        self.dead_until = {}
+        self.clock = clock
+
+    def record(self, proxy, ok, nbytes=0):
+        if proxy not in self.recent:
+            return
+        self.recent[proxy].append(bool(ok))
+        self.tries[proxy] += 1
+        self.good[proxy] += 1 if ok else 0
+        self.nbytes[proxy] += nbytes or 0
+
+    def mark_dead(self, proxy, seconds):
+        if proxy in self.recent:
+            self.dead_until[proxy] = self.clock() + seconds
+
+    def alive(self):
+        now = self.clock()
+        live = [p for p in self.pools if self.dead_until.get(p, 0) <= now]
+        return live or list(self.pools)   # every pool down: keep trying rather than stop
+
+    def rate(self, proxy):
+        d = self.recent.get(proxy)
+        if not d or len(d) < self.MIN_SAMPLES:
+            return None
+        return sum(d) / len(d)
+
+    def score(self, proxy):
+        r = self.rate(proxy)
+        return (r or 0.0) ** 2 / self.prices[proxy]
+
+    def pick(self, rnd=random.random):
+        live = self.alive()
+        if len(live) == 1:
+            return live[0]
+        cold = [p for p in live if len(self.recent[p]) < self.MIN_SAMPLES]
+        if cold:
+            return min(cold, key=lambda p: len(self.recent[p]))
+        best = max(live, key=self.score)
+        if rnd() < self.EXPLORE:
+            return random.choice([p for p in live if p != best])
+        return best
+
+    @staticmethod
+    def label(proxy):
+        try:
+            u = urlsplit(proxy)
+            return f"{u.hostname}:{u.port}" if u.port else str(u.hostname)
+        except Exception:
+            return "pool"
+
+
 class ProfileChecker:
     def __init__(self, session, settings: Settings, metrics=None):
         self.session, self.settings = session, settings
@@ -302,6 +371,9 @@ class ProfileChecker:
         from config import RESIDENTIAL_PROXIES, ROTATING_RESIDENTIAL_PROXIES
         self.residential_cycle = itertools.cycle(RESIDENTIAL_PROXIES) if RESIDENTIAL_PROXIES else None
         self.rotating_cycle = itertools.cycle(ROTATING_RESIDENTIAL_PROXIES) if ROTATING_RESIDENTIAL_PROXIES else None
+        from config import ROTATING_POOL_PRICES
+        self.board = (PoolBoard(ROTATING_RESIDENTIAL_PROXIES, ROTATING_POOL_PRICES)
+                      if len(ROTATING_RESIDENTIAL_PROXIES) > 1 else None)
         self._proxy_cooldowns = {}
         self.tier_stats = collections.Counter()   # (tier, status) -> count since start
         self.last_errors = {}                     # proxy kind -> last error text
@@ -344,6 +416,12 @@ class ProfileChecker:
             if self._proxy_cooldowns.get(p, 0) <= now:
                 return p
         return next(cycle_iter)
+
+    def _next_paid(self, cycle_iter):
+        """Next paid gateway: the scoreboard's pick when several pools are configured, else round-robin."""
+        if self.board is not None and cycle_iter is self.rotating_cycle:
+            return self.board.pick()
+        return self._get_proxy(cycle_iter)
 
     async def _execute_single_check(self, username, proxy, timeout_sec: float = 6.0):
         headers = {
@@ -401,6 +479,9 @@ class ProfileChecker:
             err_str = str(e)
             if "402" in err_str or "Payment Required" in err_str:
                 self._mark_cooldown(proxy, 86400.0)
+            if (self.board is not None and self._is_rotating(proxy)
+                    and any(k in err_str for k in ("402", "407", "Payment Required", "Proxy Authentication"))):
+                self.board.mark_dead(proxy, 1800.0)
             elif isinstance(e, (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError)):
                 self._mark_cooldown(proxy, 30.0)
             kind = "direct" if proxy is None else ("rotating" if self._is_rotating(proxy) else "webshare")
@@ -446,7 +527,11 @@ class ProfileChecker:
     BAD_POOL_RATE = float(os.getenv("BAD_POOL_RATE", 0.06))
 
     def pool_rate(self):
-        """Conclusive share of the last paid tries, or None while there is too little data."""
+        """Conclusive share of the last paid tries (best pool when several), or None while there is too little data."""
+        if self.board is not None:
+            rs = [r for r in (self.board.rate(p) for p in self.board.alive()) if r is not None]
+            if rs:
+                return max(rs)
         if len(self.paid_recent) < 30:
             return None
         return sum(self.paid_recent) / len(self.paid_recent)
@@ -464,12 +549,15 @@ class ProfileChecker:
             return True
         return sum(self.static_recent) / len(self.static_recent) >= 0.25
 
-    def _record(self, tier: str, res) -> None:
+    def _record(self, tier: str, res, proxy=None) -> None:
         """Per-tier counters: result status, body bytes, estimated paid-gateway bytes."""
         if tier == "T1-static":
             self.static_recent.append(res.status in ("active", "unavailable"))
         elif tier in ("T0-instant", "T2-rot"):
             self.paid_recent.append(res.status in ("active", "unavailable"))
+            if self.board is not None and proxy:
+                self.board.record(proxy, res.status in ("active", "unavailable"),
+                                  (getattr(res, "nbytes", 0) or 0) + self.PAID_OVERHEAD)
         self.tier_stats[(tier, res.status)] += 1
         n = getattr(res, "nbytes", 0) or 0
         self.tier_bytes.setdefault(tier, collections.deque(maxlen=500)).append(n)
@@ -506,6 +594,22 @@ class ProfileChecker:
         pr = self.pool_rate()
         lines.append("Paid pool success (last 60 tries): "
                      + ("collecting data" if pr is None else f"{100 * pr:.0f}%" + (" - BAD WINDOW, 1 try/check" if self.pool_bad() else "")))
+        if self.board is not None:
+            now = self.board.clock()
+            for i, p in enumerate(self.board.pools, 1):
+                n = self.board.tries[p]
+                rate = self.board.rate(p)
+                tag = " DOWN (no data/login)" if self.board.dead_until.get(p, 0) > now else ""
+                if n:
+                    avg = self.board.nbytes[p] / n
+                    ok = self.board.good[p] / n
+                    cost = (f", ~${avg * 1000 / max(ok, 0.01) * self.board.prices[p] / 1073741824:.2f} per 1,000 conclusive"
+                            if self.board.good[p] else "")
+                else:
+                    cost = ""
+                lines.append(f"Pool {i} {PoolBoard.label(p)}: {n} tries, "
+                             + ("collecting data" if rate is None else f"{100 * rate:.0f}% recent")
+                             + f", ${self.board.prices[p]:.2f}/GB{cost}{tag}")
         if self.PAID_DAILY_MB > 0:
             st = self.budget_state()
             hard = self.PAID_HARD_MB or self.PAID_DAILY_MB * 2
@@ -555,12 +659,12 @@ class ProfileChecker:
                 if not budget_ok:
                     n_instant = 1
                 for _ in range(n_instant):
-                    p_rot = self._get_proxy(cycle)
+                    p_rot = self._next_paid(cycle)
                     if not p_rot:
                         continue
                     rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.0)
                     trail.append(("T0-instant", rot_res.status))
-                    self._record("T0-instant", rot_res)
+                    self._record("T0-instant", rot_res, p_rot)
                     result = rot_res
                     if rot_res.status in conclusive:
                         self.metrics.outcomes[rot_res.status] += 1
@@ -594,13 +698,13 @@ class ProfileChecker:
         if use_paid:
             n_routine = 1 if (pace or (self.pool_bad() and not fast)) else max(1, self.ROUTINE_PAID_ATTEMPTS)
             for _ in range(n_routine):
-                p_rot = self._get_proxy(self.rotating_cycle)
+                p_rot = self._next_paid(self.rotating_cycle)
                 if not p_rot:
                     break
                 rot_res = await self._execute_single_check(username, p_rot, timeout_sec=5.0)
                 result = rot_res
                 trail.append(("T2-rot", rot_res.status))
-                self._record("T2-rot", rot_res)
+                self._record("T2-rot", rot_res, p_rot)
                 if rot_res.status in conclusive:
                     self.metrics.outcomes[rot_res.status] += 1
                     return rot_res

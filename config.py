@@ -124,9 +124,43 @@ except Exception:
 
 DATAIMPULSE_PROXY = ROTATING_PROXY
 
-ROTATING_RESIDENTIAL_PROXIES = (
-    (ROTATING_PROXY,) if ROTATING_PROXY else ()
-)
+
+def _split_price(entry: str):
+    """'0.30|host:port:user:pass' -> (0.30, 'host:port:user:pass'); no prefix -> (None, entry)."""
+    head, sep, rest = entry.partition("|")
+    if sep:
+        try:
+            return max(0.01, float(head)), rest.strip()
+        except ValueError:
+            pass
+    return None, entry.strip()
+
+
+# Optional extra paid per-GB pools (any provider). ROTATING_PROXIES = space/comma/newline separated,
+# each entry optionally prefixed with its price per GB, e.g. "1.00|host:port:user:pass".
+# The checker measures how often each pool gives a conclusive answer and sends most tries to the best one.
+ROTATING_POOL_PRICES: dict = {}
+_pools = []
+if ROTATING_PROXY:
+    _pools.append(ROTATING_PROXY)
+    try:
+        ROTATING_POOL_PRICES[ROTATING_PROXY] = max(0.01, float(os.getenv("ROTATING_PROXY_PRICE") or 1.0))
+    except ValueError:
+        ROTATING_POOL_PRICES[ROTATING_PROXY] = 1.0
+for _entry in re.split(r"[\s,]+", (os.getenv("ROTATING_PROXIES") or "").strip()):
+    if not _entry:
+        continue
+    _price, _raw = _split_price(_entry)
+    try:
+        _url = parse_proxy_entry(_raw)
+    except Exception:
+        continue
+    if _url not in _pools:
+        _pools.append(_url)
+    if _price is not None or _url not in ROTATING_POOL_PRICES:
+        ROTATING_POOL_PRICES[_url] = _price if _price is not None else 1.0
+
+ROTATING_RESIDENTIAL_PROXIES = tuple(_pools)
 
 RESIDENTIAL_PROXIES = (
     # Webshare Fresh Static Residential Proxies (Plan 14809547 - High Reputation - UNLIMITED BANDWIDTH)
