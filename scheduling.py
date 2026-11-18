@@ -1,6 +1,7 @@
 """Two-tier check cadence: new accounts fast, old accounts slow (env configurable)."""
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import random
@@ -14,6 +15,13 @@ FAST_WINDOW_H = float(os.getenv("FAST_WINDOW_HOURS", 168))
 RETRY_S = float(os.getenv("RETRY_INTERVAL_SECONDS", 8))
 RETRY_MAX = int(os.getenv("RETRY_MAX_CONSECUTIVE", 1))
 NAME_WATCH_S = float(os.getenv("NAME_WATCH_INTERVAL_SECONDS", 120))
+# Ban confirmation: a ban alert needs several conclusive "unavailable" answers from independent requests
+# (new IP each) with no conclusive "active" in between. Blocked/login-wall answers are not evidence either way,
+# so they must not throw the first observation away (that made alerts take ~1h when the paid pool is weak).
+BAN_CONFIRM_TRIES = int(os.getenv("BAN_CONFIRM_TRIES", 8))
+BAN_CONFIRM_SIGHTINGS = int(os.getenv("BAN_CONFIRM_SIGHTINGS", 3))
+BAN_CONFIRM_WINDOW_S = float(os.getenv("BAN_CONFIRM_WINDOW_SECONDS", 300))
+BAN_CONFIRM_GAP_S = float(os.getenv("BAN_CONFIRM_GAP_SECONDS", 1.5))
 
 
 def _age_hours(rec: dict) -> float:
@@ -32,6 +40,7 @@ class TierScheduler:
     def __init__(self):
         self.last_checked: dict[str, float] = {}
         self.retries: dict[str, int] = {}
+        self.ban_seen: dict[str, list] = {}  # username -> times of unconfirmed conclusive 'unavailable' sightings
         self.outcomes: deque = deque(maxlen=5000)  # (monotonic_ts, status)
         self.lag = {"fast": deque(maxlen=500), "slow": deque(maxlen=500)}
         self.counts = {"fast": 0, "slow": 0}
@@ -45,6 +54,8 @@ class TierScheduler:
             groups.setdefault(r.get("username"), []).append(r)
         for k in [k for k in self.last_checked if k not in groups]:
             del self.last_checked[k]
+        for k in [k for k in self.ban_seen if k not in groups]:
+            del self.ban_seen[k]
         out = []
         counts = {"fast": 0, "slow": 0}
         for k, recs in groups.items():
@@ -93,6 +104,42 @@ class TierScheduler:
         interval = FAST_S if self.tier_of(rec) == "fast" else SLOW_S
         if RETRY_S < interval:
             self.last_checked[k] = time.monotonic() - interval + RETRY_S
+
+    def note_status(self, username, status):
+        """A conclusive 'active' proves the account is live: forget earlier 'unavailable' sightings."""
+        if status == "active":
+            self.ban_seen.pop(username, None)
+
+    async def confirm_ban(self, checker, username, first):
+        """`first` is a conclusive 'unavailable'. A ban is confirmed only after BAN_CONFIRM_SIGHTINGS conclusive
+        'unavailable' answers (independent requests, new IP each) within BAN_CONFIRM_WINDOW_S with no conclusive
+        'active' in between. Blocked/unknown answers are not evidence either way: they neither confirm nor erase
+        earlier sightings. Returns the result to act on ('unavailable' only when confirmed)."""
+        now = time.monotonic()
+        seen = [t for t in self.ban_seen.get(username, []) if now - t <= BAN_CONFIRM_WINDOW_S]
+        seen.append(now)
+        self.ban_seen[username] = seen
+        if len(seen) >= BAN_CONFIRM_SIGHTINGS:
+            self.ban_seen.pop(username, None)
+            return first
+        last = first
+        for i in range(BAN_CONFIRM_TRIES):
+            if i:
+                await asyncio.sleep(BAN_CONFIRM_GAP_S)
+            again = await checker.check(username, allow_paid=True, fast=True)
+            st = getattr(again, "status", None)
+            if st == "active":
+                self.ban_seen.pop(username, None)
+                return again
+            if st == "unavailable":
+                seen = [t for t in self.ban_seen.get(username, []) if time.monotonic() - t <= BAN_CONFIRM_WINDOW_S]
+                seen.append(time.monotonic())
+                self.ban_seen[username] = seen
+                if len(seen) >= BAN_CONFIRM_SIGHTINGS:
+                    self.ban_seen.pop(username, None)
+                    return again
+            last = again
+        return last
 
     def record_outcome(self, status):
         self.outcomes.append((time.monotonic(), status or "none"))
